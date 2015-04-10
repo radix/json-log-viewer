@@ -38,6 +38,8 @@ executable json-log-viewer
                        , text >= 1.2.0.0
                        , containers >= 0.5.6.0
                        , bytestring >= 0.10.6.0
+                       , vector >= 0.10.12.0
+                       , unordered-containers >= 0.2.5.0
   
   -- Directories containing source files.
   hs-source-dirs:      src

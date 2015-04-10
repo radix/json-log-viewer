@@ -10,7 +10,7 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.Text as Text
 import qualified Data.Vector as V
 
-import Graphics.Vty.Widgets.All
+import qualified Graphics.Vty.Widgets.All as UI
 import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
@@ -108,24 +108,27 @@ main = do
   let actualJsons = catMaybes inputJsons
   let messages = catMaybes $ map (jsonPath getMessage) actualJsons
   let filteredMessages = filter (matchFilter errorsOrConverger) actualJsons
-  mapM_ (putStrLn . C8.unpack . Aeson.encode) filteredMessages
+  let filteredMessagesText = map (T.pack . C8.unpack . Aeson.encode) filteredMessages
   return "okay."
 
   -- UI stuff
-  label <- plainText "Enter your name:"
-  e1 <- editWidget
-  box <- hBox label e1
-  borderedW <- bordered box
-  ui <- centered borderedW
+  label <- UI.plainText "Enter your name:"
+  e1 <- UI.editWidget
+  labelAndEdit <- UI.hBox label e1
+  prompt <- UI.bordered labelAndEdit
+  messageList <- UI.newTextList filteredMessagesText 1
+  promptAndList <- UI.vBox prompt messageList
+  ui <- UI.centered promptAndList
 
-  fg <- newFocusGroup
-  addToFocusGroup fg e1
+  fg <- UI.newFocusGroup
+  UI.addToFocusGroup fg e1
+  UI.addToFocusGroup fg messageList
 
-  c <- newCollection
-  addToCollection c ui fg
+  c <- UI.newCollection
+  UI.addToCollection c ui fg
 
-  e1 `onActivate` \this ->
-    getEditText this >>= (error . ("You entered: " ++) . T.unpack)
+  e1 `UI.onActivate` \this ->
+    UI.getEditText this >>= (error . ("You entered: " ++) . T.unpack)
 
-  -- runUi c defaultContext
+  UI.runUi c UI.defaultContext
 

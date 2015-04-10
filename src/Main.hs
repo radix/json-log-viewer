@@ -19,6 +19,9 @@ import qualified Text.Parsec as P
 
 
 -- JSON PATH
+-- TODO: Make this support all of JSONPath and split it off into an Aeson.Path
+-- module.
+
 data JSONSelector
   = SelectKey Text.Text
   | SelectIndex Int
@@ -39,6 +42,8 @@ jsonPath _ _ = Nothing
 
 
 -- Parsing of JSON Path
+-- TODO: Make this support all of JSONPath and split it off into an
+-- Aeson.Path.Parser module.
 
 {-
 examples:
@@ -51,6 +56,7 @@ examples:
 -- operator cheatsheet:
 -- - '*>' parse the left then parse the right, and return the right.
 -- - '<*' same, but return the left.
+-- - '<*>' I haven't internalized this one yet, in the context of parsec :(
 -- - '<|>' either parse the left or the right.
 -- - '<$>' apply the pure function on the left to the result of parsing the
 --   right.
@@ -66,10 +72,14 @@ jsonPathParser = dollar *> pathItems
     selectKey        = (SelectKey . T.pack) <$> quotedAttribute
     selector         = selectIndex P.<|> selectKey
     selectorBrackets = P.between (P.char '[') (P.char ']') selector
+
+    -- The fun/tricky bit: `select` results in a *partially applied* `Select`,
+    -- and it is filled in with the remaining JSONPath in the recursive
+    -- `pathItems`.
     yield            = (const Yield) <$> P.eof
-    select           = (\x -> Select x) <$> selectorBrackets
+    select           = Select <$> selectorBrackets
     pathItems        = yield P.<|> (select <*> pathItems)
-    
+
 getPath :: String -> Either P.ParseError JSONPath
 getPath st = P.parse jsonPathParser "" st
 
@@ -103,17 +113,14 @@ matchFilter (Filter jspath predicate) aesonValue
         True
       else
         False
-matchFilter (AllFilters filters) aesonValue = all (\f -> matchFilter f aesonValue) filters
-matchFilter (AnyFilter filters) aesonValue = any (\f -> matchFilter f aesonValue) filters
+matchFilter (AllFilters filters) aesonValue = all (flip matchFilter aesonValue) filters
+matchFilter (AnyFilter filters) aesonValue = any (flip matchFilter aesonValue) filters
 matchFilter _ _ = False
-
-
 
 
 {-
 
 TODO:
-- parse JSON Path to JSONPath
 - dialog box for creating a filter
 - tail a file, continuously apply filters (maybe revert to plain text for a bit
   to PoC this)

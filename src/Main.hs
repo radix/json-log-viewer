@@ -28,11 +28,9 @@ data JSONPath
 jsonPath :: JSONPath -> Aeson.Value -> Maybe Aeson.Value
 jsonPath Yield value = Just value
 jsonPath (Select (SelectKey key) remainingPath) (Aeson.Object obj)
-  | Just value <- HM.lookup key obj
-    = jsonPath remainingPath value
+  | Just value <- HM.lookup key obj = jsonPath remainingPath value
 jsonPath (Select (SelectIndex index) remainingPath) (Aeson.Array array)
-  | Just value <- array V.!? index
-    = jsonPath remainingPath value
+  | Just value <- array V.!? index = jsonPath remainingPath value
 jsonPath _ _ = Nothing
 
 
@@ -68,7 +66,7 @@ matchFilter (AnyFilter filters) aesonValue = any (\f -> matchFilter f aesonValue
 matchFilter _ _ = False
 
 
--- sample
+-- examples
 getMessage :: JSONPath
 getMessage = Select (SelectKey "message") Yield
 
@@ -94,6 +92,18 @@ errorsOrConverger = AnyFilter [
   convergerFilter,
   (Filter Yield (HasKey "exception_type"))]
 
+
+{-
+
+TODO:
+- parse JSON Path to JSONPath
+- dialog box for creating a filter
+- tail a file, continuously apply filters (maybe revert to plain text for a bit
+  to PoC this)
+  - https://gist.github.com/ijt/1055731
+- pinning lol
+
+-}
 
 
 main = do

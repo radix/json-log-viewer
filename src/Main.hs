@@ -15,15 +15,19 @@ import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
 
+import qualified Text.Parsec as P
+
 
 -- JSON PATH
 data JSONSelector
   = SelectKey Text.Text
   | SelectIndex Int
+  deriving Show
 
 data JSONPath
   = Yield
   | Select JSONSelector JSONPath
+  deriving Show
 
 jsonPath :: JSONPath -> Aeson.Value -> Maybe Aeson.Value
 jsonPath Yield value = Just value
@@ -34,6 +38,42 @@ jsonPath (Select (SelectIndex index) remainingPath) (Aeson.Array array)
 jsonPath _ _ = Nothing
 
 
+-- Parsing of JSON Path
+
+{-
+examples:
+- $['message']
+- $['foobars'][1]
+-}
+
+-- jsonPathParser is a Parsec parser that parses a String and produces a
+-- JSONPath.
+-- operator cheatsheet:
+-- - '*>' parse the left then parse the right, and return the right.
+-- - '<*' same, but return the left.
+-- - '<|>' either parse the left or the right.
+-- - '<$>' apply the pure function on the left to the result of parsing the
+--   right.
+jsonPathParser :: P.Parsec String st JSONPath
+jsonPathParser = dollar *> pathItems
+  where
+    dollar           = P.char '$'
+    quote            = P.char '\''
+    number           = read <$> (P.many1 $ P.oneOf "0123456789")
+    str              = (P.many $ P.noneOf "'")
+    quotedAttribute  = P.between quote quote str
+    selectIndex      = SelectIndex <$> number
+    selectKey        = (SelectKey . T.pack) <$> quotedAttribute
+    selector         = selectIndex P.<|> selectKey
+    selectorBrackets = P.between (P.char '[') (P.char ']') selector
+    yield            = (const Yield) <$> P.eof
+    select           = (\x -> Select x) <$> selectorBrackets
+    pathItems        = yield P.<|> (select <*> pathItems)
+    
+getPath :: String -> Either P.ParseError JSONPath
+getPath st = P.parse jsonPathParser "" st
+
+
 -- FILTRATION
 
 data JSONPredicate
@@ -41,11 +81,13 @@ data JSONPredicate
   | MatchesRegex T.Text
   | HasSubstring T.Text
   | HasKey T.Text
+  deriving Show
 
 data Filter
   = Filter JSONPath JSONPredicate
   | AllFilters [Filter]
   | AnyFilter [Filter]
+  deriving Show
 
 matchPredicate :: JSONPredicate -> Aeson.Value -> Bool
 matchPredicate (Equals expected)       got = expected == got
@@ -66,31 +108,6 @@ matchFilter (AnyFilter filters) aesonValue = any (\f -> matchFilter f aesonValue
 matchFilter _ _ = False
 
 
--- examples
-getMessage :: JSONPath
-getMessage = Select (SelectKey "message") Yield
-
-getOtterService :: JSONPath
-getOtterService = Select (SelectKey "otter_service") Yield
-
-getOtterFacility :: JSONPath
-getOtterFacility = Select (SelectKey "otter_facility") Yield
-
-convergerFilter :: Filter
-convergerFilter = Filter getOtterService (Equals "converger")
-
-kazooFilter :: Filter
-kazooFilter = Filter getOtterFacility (Equals "kazoo")
-
-kazooSends :: Filter
-kazooSends = AllFilters [
-  kazooFilter,
-  (Filter getMessage (HasSubstring "Sending request"))]
-
-errorsOrConverger :: Filter
-errorsOrConverger = AnyFilter [
-  convergerFilter,
-  (Filter Yield (HasKey "exception_type"))]
 
 
 {-
@@ -107,6 +124,23 @@ TODO:
 
 
 main = do
+
+  -- examples
+  let getMessageE = getPath "$['message']"
+  putStrLn $ show getMessageE
+  Right getMessage <- return getMessageE
+  Right getOtterService <- return $ getPath "$['otter_service']"
+  Right getOtterFacility <- return $ getPath "$['otter_facility']"
+
+  let convergerFilter = Filter getOtterService (Equals "converger")
+  let kazooFilter = Filter getOtterFacility (Equals "kazoo")
+  let kazooSends = AllFilters [
+        kazooFilter,
+        (Filter getMessage (HasSubstring "Sending request"))]
+
+  let errorsOrConverger = AnyFilter [
+        convergerFilter,
+        (Filter Yield (HasKey "exception_type"))]
 
   args <- getArgs
   content <- BS.readFile (args !! 0)

@@ -13,6 +13,7 @@ import qualified Data.Vector as V
 import Graphics.Vty.Widgets.All
 import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as BS
+import qualified Data.ByteString.Lazy.Char8 as C8
 
 
 -- JSON PATH
@@ -41,20 +42,30 @@ data JSONPredicate
   = Equals Value
   | MatchesRegex T.Text
   | HasSubstring T.Text
+  | HasKey T.Text
 
 data Filter
   = Filter JSONPath JSONPredicate
-  | Filters [Filter]
+  | AllFilters [Filter]
+  | AnyFilter [Filter]
 
+matchPredicate :: JSONPredicate -> Aeson.Value -> Bool
+matchPredicate (Equals expected)       got = expected == got
+matchPredicate (HasSubstring expected) (Aeson.String got) = expected `T.isInfixOf` got
+matchPredicate (MatchesRegex expected) _ = error "Implement MatchesRegex"
+matchPredicate (HasKey expected) (Aeson.Object hm) = HM.member expected hm
+matchPredicate _ _ = False
 
-matchFilter :: Filter -> Aeson.Value -> Maybe Aeson.Value
-matchFilter (Filter jspath (Equals expected)) aesonValue
+matchFilter :: Filter -> Aeson.Value -> Bool
+matchFilter (Filter jspath predicate) aesonValue
   | Just gotValue <- jsonPath jspath aesonValue
-    = if gotValue == expected then
-        Just aesonValue
+    = if predicate `matchPredicate` gotValue then
+        True
       else
-        Nothing
-matchFilter _ _ = Nothing
+        False
+matchFilter (AllFilters filters) aesonValue = all (\f -> matchFilter f aesonValue) filters
+matchFilter (AnyFilter filters) aesonValue = any (\f -> matchFilter f aesonValue) filters
+matchFilter _ _ = False
 
 
 -- sample
@@ -64,8 +75,26 @@ getMessage = Select (SelectKey "message") Yield
 getOtterService :: JSONPath
 getOtterService = Select (SelectKey "otter_service") Yield
 
+getOtterFacility :: JSONPath
+getOtterFacility = Select (SelectKey "otter_facility") Yield
+
 convergerFilter :: Filter
 convergerFilter = Filter getOtterService (Equals "converger")
+
+kazooFilter :: Filter
+kazooFilter = Filter getOtterFacility (Equals "kazoo")
+
+kazooSends :: Filter
+kazooSends = AllFilters [
+  kazooFilter,
+  (Filter getMessage (HasSubstring "Sending request"))]
+
+errorsOrConverger :: Filter
+errorsOrConverger = AnyFilter [
+  convergerFilter,
+  (Filter Yield (HasKey "exception_type"))]
+
+
 
 main = do
 
@@ -77,11 +106,9 @@ main = do
   -- parsing stuff
   let inputJsons = (map Aeson.decode inputLines) :: [Maybe Aeson.Value]
   let actualJsons = catMaybes inputJsons
-  putStrLn ("parsed " ++ (show $ length inputJsons) ++ " lines of text")
-  putStrLn ("got " ++ (show $ length $ actualJsons) ++ " actual jsons")
   let messages = catMaybes $ map (jsonPath getMessage) actualJsons
-  let messagesWithConverger = catMaybes $ map (matchFilter convergerFilter) actualJsons
-  mapM_ (putStrLn . show) messagesWithConverger
+  let filteredMessages = filter (matchFilter errorsOrConverger) actualJsons
+  mapM_ (putStrLn . C8.unpack . Aeson.encode) filteredMessages
   return "okay."
 
   -- UI stuff

@@ -209,8 +209,10 @@ main = do
 
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ s _) -> do
     let decoded = (Aeson.decode (C8.pack (T.unpack s)) :: Maybe Aeson.Value)
-    Just decoded <- return decoded
-    UI.setText mdBody $ T.pack $ C8.unpack $ AesonPretty.encodePretty decoded
+    let decodingError = T.pack "can't decode json even though I already did?"
+    let prettyPrint = \json -> do
+          T.pack $ C8.unpack $ AesonPretty.encodePretty decoded
+    UI.setText mdBody $ maybe decodingError prettyPrint decoded
     switchToMessageDetail
 
   messageDetailFg `UI.onKeyPressed` \_ key _ ->

@@ -161,6 +161,44 @@ makeMessageDetailWindow = do
   messageDetail <- UI.vBox mdHeader mdBody
   return (messageDetail, mdBody)
 
+makeFilterCreationWindow = do
+  nameLabel <- UI.plainText "Filter Name:"
+  nameEdit <- UI.editWidget
+  nameField <- UI.hBox nameLabel nameEdit
+
+  jsonPathLabel <- UI.plainText "JSON Path:"
+  jsonPathEdit <- UI.editWidget
+  jsonPathField <- UI.hBox jsonPathLabel jsonPathEdit
+
+  parseStatusLabel <- UI.plainText "Parse status:"
+  parseStatusText <- UI.plainText "Please Enter a JSON Path."
+  parseStatusField <- UI.hBox parseStatusLabel parseStatusText
+
+  operatorLabel <- UI.plainText "Operator:"
+  operandLabel <- UI.plainText "Operand:"
+  operandEdit <- UI.editWidget
+  operandField <- UI.hBox operandLabel operandEdit
+
+  dialogBody <- UI.newTable [UI.column UI.ColAuto] UI.BorderNone
+
+  UI.addRow dialogBody nameField
+  UI.addRow dialogBody jsonPathField
+  UI.addRow dialogBody parseStatusField
+  UI.addRow dialogBody operandField
+  (filterDialog, filterFg) <- UI.newDialog dialogBody "Create New Filter"
+  let filterCreationWindow = UI.dialogWidget filterDialog
+
+  let filterFocuses = [nameEdit, jsonPathEdit, operandEdit]
+  forM_ filterFocuses (flip UI.onActivate (\x -> UI.focusNext filterFg))
+  forM_ filterFocuses (UI.addToFocusGroup filterFg)
+
+  jsonPathEdit `UI.onChange` \text -> do
+    let path = getPath $ T.unpack text
+    case path of
+     (Left error) -> UI.setText parseStatusText $ T.pack $ show error
+     (Right parse) -> UI.setText parseStatusText "Valid! :-)"
+
+  return (filterCreationWindow, nameEdit, filterFg, filterDialog)
 
 main = do
 
@@ -207,35 +245,9 @@ main = do
    - parse status
    - sample of matching messages
    -}
-  nameLabel <- UI.plainText "Filter Name:"
-  nameEdit <- UI.editWidget
-  nameField <- UI.hBox nameLabel nameEdit
 
-  jsonPathLabel <- UI.plainText "JSON Path:"
-  jsonPathEdit <- UI.editWidget
-  jsonPathField <- UI.hBox jsonPathLabel jsonPathEdit
+  (filterCreationWindow, filterNameEdit, filterFg, filterDialog) <- makeFilterCreationWindow
 
-  parseStatusLabel <- UI.plainText "Parse status:"
-  parseStatusText <- UI.plainText "Please Enter a JSON Path."
-  parseStatusField <- UI.hBox parseStatusLabel parseStatusText
-
-  operatorLabel <- UI.plainText "Operator:"
-  operandLabel <- UI.plainText "Operand:"
-  operandEdit <- UI.editWidget
-  operandField <- UI.hBox operandLabel operandEdit
-
-  dialogBody <- UI.newTable [UI.column UI.ColAuto] UI.BorderNone
-
-  UI.addRow dialogBody nameField
-  UI.addRow dialogBody jsonPathField
-  UI.addRow dialogBody parseStatusField
-  UI.addRow dialogBody operandField
-  (filterDialog, filterFg) <- UI.newDialog dialogBody "Create New Filter"
-  let filterCreationWidget = UI.dialogWidget filterDialog
-
-  let filterFocuses = [nameEdit, jsonPathEdit, operandEdit]
-  forM_ filterFocuses (flip UI.onActivate (\x -> UI.focusNext filterFg))
-  forM_ filterFocuses (UI.addToFocusGroup filterFg)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList
@@ -246,12 +258,12 @@ main = do
   c <- UI.newCollection
   switchToMain <- UI.addToCollection c ui mainFg
   switchToMessageDetail <- UI.addToCollection c messageDetail messageDetailFg
-  switchToFilterCreation <- UI.addToCollection c filterCreationWidget filterFg
+  switchToFilterCreation <- UI.addToCollection c filterCreationWindow filterFg
 
   mainFg `UI.onKeyPressed` \_ key _ ->
     case key of
      Events.KEsc -> exitSuccess
-     (Events.KChar 'f') -> UI.focus nameEdit >> switchToFilterCreation >> return True
+     (Events.KChar 'f') -> UI.focus filterNameEdit >> switchToFilterCreation >> return True
      _ -> return False
 
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ s _) -> do

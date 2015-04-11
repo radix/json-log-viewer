@@ -1,27 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE PatternGuards     #-}
 
 module Main where
 
-import System.Environment (getArgs)
-import qualified System.Exit as Exit
-
-import Data.Maybe
-import qualified Data.HashMap.Strict as HM
-import qualified Data.Text as Text
-import Data.Text.Encoding (encodeUtf8)
-import qualified Data.Vector as V
-
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Encode.Pretty as AesonPretty
-
-import qualified Graphics.Vty.Widgets.All as UI
-import qualified Graphics.Vty.Input.Events as Events
-import qualified Data.Text as T
-import qualified Data.ByteString.Lazy as BS
+import qualified Data.Aeson                 as Aeson
+import           Data.Aeson.Encode.Pretty   (encodePretty)
+import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
-
-import qualified Text.Parsec as P
+import qualified Data.HashMap.Strict        as HM
+import           Data.Maybe                 (catMaybes, maybe)
+import qualified Data.Text                  as T
+import           Data.Text.Encoding         (encodeUtf8)
+import qualified Data.Vector                as V
+import qualified Graphics.Vty.Input.Events  as Events
+import qualified Graphics.Vty.Widgets.All   as UI
+import           System.Environment         (getArgs)
+import           System.Exit                (exitSuccess)
+import qualified Text.Parsec                as P
 
 
 -- JSON PATH
@@ -29,7 +24,7 @@ import qualified Text.Parsec as P
 -- module.
 
 data JSONSelector
-  = SelectKey Text.Text
+  = SelectKey T.Text
   | SelectIndex Int
   deriving Show
 
@@ -204,14 +199,14 @@ main = do
 
   mainFg `UI.onKeyPressed` \_ key _ ->
     case key of
-     Events.KEsc -> Exit.exitSuccess
+     Events.KEsc -> exitSuccess
      _ -> return False
 
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ s _) -> do
     let decoded = (Aeson.decode (C8.pack (T.unpack s)) :: Maybe Aeson.Value)
-    let decodingError = T.pack "can't decode json even though I already did?"
+    let decodingError = "can't decode json even though I already did?"
     let prettyPrint = \json -> do
-          T.pack $ C8.unpack $ AesonPretty.encodePretty decoded
+          T.pack $ C8.unpack $ encodePretty decoded
     UI.setText mdBody $ maybe decodingError prettyPrint decoded
     switchToMessageDetail
 

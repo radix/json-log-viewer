@@ -1,7 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards     #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
 
 module Main where
+
+import Data.Aeson.Path
+import Data.Aeson.Path.Parser
 
 import           Control.Monad              (forM_)
 import qualified Data.Aeson                 as Aeson
@@ -11,79 +15,10 @@ import qualified Data.ByteString.Lazy.Char8 as C8
 import qualified Data.HashMap.Strict        as HM
 import           Data.Maybe                 (catMaybes, maybe)
 import qualified Data.Text                  as T
-import           Data.Text.Encoding         (encodeUtf8)
-import qualified Data.Vector                as V
 import qualified Graphics.Vty.Input.Events  as Events
 import qualified Graphics.Vty.Widgets.All   as UI
 import           System.Environment         (getArgs)
 import           System.Exit                (exitSuccess)
-import qualified Text.Parsec                as P
-
-
--- JSON PATH
--- TODO: Make this support all of JSONPath and split it off into an Aeson.Path
--- module.
-
-data JSONSelector
-  = SelectKey T.Text
-  | SelectIndex Int
-  deriving Show
-
-data JSONPath
-  = Yield
-  | Select JSONSelector JSONPath
-  deriving Show
-
-jsonPath :: JSONPath -> Aeson.Value -> Maybe Aeson.Value
-jsonPath Yield value = Just value
-jsonPath (Select (SelectKey key) remainingPath) (Aeson.Object obj)
-  | Just value <- HM.lookup key obj = jsonPath remainingPath value
-jsonPath (Select (SelectIndex index) remainingPath) (Aeson.Array array)
-  | Just value <- array V.!? index = jsonPath remainingPath value
-jsonPath _ _ = Nothing
-
-
--- Parsing of JSON Path
--- TODO: Make this support all of JSONPath and split it off into an
--- Aeson.Path.Parser module.
-
-{-
-examples:
-- $['message']
-- $['foobars'][1]
--}
-
--- jsonPathParser is a Parsec parser that parses a String and produces a
--- JSONPath.
--- operator cheatsheet:
--- - '*>' parse the left then parse the right, and return the right.
--- - '<*' same, but return the left.
--- - '<*>' I haven't internalized this one yet, in the context of parsec :(
--- - '<|>' either parse the left or the right.
--- - '<$>' apply the pure function on the left to the result of parsing the
---   right.
-jsonPathParser :: P.Parsec String st JSONPath
-jsonPathParser = dollar *> pathItems
-  where
-    dollar           = P.char '$'
-    quote            = P.char '\''
-    number           = read <$> (P.many1 $ P.oneOf "0123456789")
-    str              = (P.many $ P.noneOf "'")
-    quotedAttribute  = P.between quote quote str
-    selectIndex      = SelectIndex <$> number
-    selectKey        = (SelectKey . T.pack) <$> quotedAttribute
-    selector         = selectIndex P.<|> selectKey
-    selectorBrackets = P.between (P.char '[') (P.char ']') selector
-
-    -- The fun/tricky bit: `select` results in a *partially applied* `Select`,
-    -- and it is filled in with the remaining JSONPath in the recursive
-    -- `pathItems`.
-    yield            = (const Yield) <$> P.eof
-    select           = Select <$> selectorBrackets
-    pathItems        = yield P.<|> (select <*> pathItems)
-
-getPath :: String -> Either P.ParseError JSONPath
-getPath st = P.parse jsonPathParser "" st
 
 
 -- FILTRATION
@@ -165,11 +100,6 @@ makeFilterCreationWindow = do
   {-
    - operator (Equals, SubString, Regex)
    - sample of matching messages
-
-  Equals Aeson.Value -- only Text for now
-  MatchesRegex T.Text
-  HasSubstring T.Text
-  HasKey T.Text
 -}
 
   nameLabel <- UI.plainText "Filter Name:"
@@ -200,24 +130,26 @@ makeFilterCreationWindow = do
   operandField <- UI.hBox operandLabel operandEdit
 
   dialogBody <- UI.newTable [UI.column UI.ColAuto] UI.BorderNone
+  let addRow = UI.addRow dialogBody
+  addRow nameField
+  addRow jsonPathField
+  addRow parseStatusField
+  addRow operatorRadioChecks
+  addRow operandField
 
-  UI.addRow dialogBody nameField
-  UI.addRow dialogBody jsonPathField
-  UI.addRow dialogBody parseStatusField
-  UI.addRow dialogBody operatorRadioChecks
-  UI.addRow dialogBody operandField
   (filterDialog, filterFg) <- UI.newDialog dialogBody "Create New Filter"
   let filterCreationWindow = UI.dialogWidget filterDialog
 
   let returnKeyMeansNext = [nameEdit, jsonPathEdit, operandEdit]
   forM_ returnKeyMeansNext (flip UI.onActivate (\x -> UI.focusNext filterFg))
-  UI.addToFocusGroup filterFg nameEdit
-  UI.addToFocusGroup filterFg jsonPathEdit
-  UI.addToFocusGroup filterFg equalsCheck
-  UI.addToFocusGroup filterFg equalsCheck
-  UI.addToFocusGroup filterFg substringCheck
-  UI.addToFocusGroup filterFg hasKeyCheck
-  UI.addToFocusGroup filterFg operandEdit
+
+  let addFocus = UI.addToFocusGroup filterFg
+  addFocus nameEdit
+  addFocus jsonPathEdit
+  addFocus equalsCheck
+  addFocus substringCheck
+  addFocus hasKeyCheck
+  addFocus operandEdit
 
   jsonPathEdit `UI.onChange` \text -> do
     let path = getPath $ T.unpack text
@@ -301,6 +233,4 @@ main = do
   filterDialog `UI.onDialogAccept` const switchToMain
   filterDialog `UI.onDialogCancel` const switchToMain
 
-
   UI.runUi c UI.defaultContext
-

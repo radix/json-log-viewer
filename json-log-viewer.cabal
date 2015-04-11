@@ -30,6 +30,8 @@ executable json-log-viewer
   
   -- LANGUAGE extensions used by modules in this package.
   other-extensions: OverloadedStrings
+                  , NoMonomorphismRestriction
+                  , PatternGuards
   
   -- Other library packages from which modules are imported.
   build-depends:       base >=4.8 && <4.9

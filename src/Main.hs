@@ -134,6 +134,33 @@ TODO:
 -}
 
 
+
+makeMainWindow filteredMessagesText = do
+  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, DEL=Delete filter, RET=Inspect, P=Pin message, C=Create Filter"
+  borderedMainHeader <- UI.bordered mainHeader
+  messageHeader <- UI.plainText "Messages"
+  messageList <- UI.newTextList filteredMessagesText 1
+  filterHeader <- UI.plainText "Filters"
+  filterList <- UI.newTextList ["foo", "bar"] 1
+  borderedFilters <- UI.bordered filterList
+  borderedMessages <- UI.bordered messageList
+  messagesAndHeader <- UI.vBox messageHeader borderedMessages
+  filtersAndHeader <- UI.vBox filterHeader borderedFilters
+  hb <- UI.hBox filtersAndHeader messagesAndHeader
+  UI.setBoxChildSizePolicy hb $ UI.Percentage 15
+  headerAndBody <- UI.vBox borderedMainHeader hb
+  ui <- UI.centered headerAndBody
+  return (ui, messageList, filterList)
+
+
+makeMessageDetailWindow = do
+  mdHeader <- UI.plainText "Message Detail. ESC=return"
+  mdHeader <- UI.bordered mdHeader
+  mdBody <- UI.plainText "Insert message here."
+  messageDetail <- UI.vBox mdHeader mdBody
+  return (messageDetail, mdBody)
+
+
 main = do
 
   -- examples
@@ -166,26 +193,11 @@ main = do
   -- UI stuff
 
   -- main window
-  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, DEL=Delete filter, RET=Inspect, P=Pin message, C=Create Filter"
-  borderedMainHeader <- UI.bordered mainHeader
-  messageHeader <- UI.plainText "Messages"
-  messageList <- UI.newTextList filteredMessagesText 1
-  filterHeader <- UI.plainText "Filters"
-  filterList <- UI.newTextList ["foo", "bar"] 1
-  borderedFilters <- UI.bordered filterList
-  borderedMessages <- UI.bordered messageList
-  messagesAndHeader <- UI.vBox messageHeader borderedMessages
-  filtersAndHeader <- UI.vBox filterHeader borderedFilters
-  hb <- UI.hBox filtersAndHeader messagesAndHeader
-  UI.setBoxChildSizePolicy hb $ UI.Percentage 15
-  headerAndBody <- UI.vBox borderedMainHeader hb
-  ui <- UI.centered headerAndBody
+  (ui, messageList, filterList) <- makeMainWindow filteredMessagesText
+
 
   -- message detail
-  mdHeader <- UI.plainText "Message Detail. ESC=return"
-  mdHeader <- UI.bordered mdHeader
-  mdBody <- UI.plainText "Insert message here."
-  messageDetail <- UI.vBox mdHeader mdBody
+  (messageDetail, mdBody) <- makeMessageDetailWindow
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList

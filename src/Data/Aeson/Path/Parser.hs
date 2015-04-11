@@ -1,8 +1,8 @@
 module Data.Aeson.Path.Parser where
 
-import qualified Text.Parsec                as P
-import Data.Aeson.Path
-import Data.Text as T
+import           Data.Aeson.Path
+import           Data.Text       as T
+import qualified Text.Parsec     as P
 
 
 -- Parsing of JSON Path

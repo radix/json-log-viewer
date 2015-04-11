@@ -1,11 +1,8 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards     #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
+{-# LANGUAGE OverloadedStrings         #-}
+{-# LANGUAGE PatternGuards             #-}
 
 module Main where
-
-import Data.Aeson.Path
-import Data.Aeson.Path.Parser
 
 import           Control.Monad              (forM_)
 import qualified Data.Aeson                 as Aeson
@@ -19,6 +16,9 @@ import qualified Graphics.Vty.Input.Events  as Events
 import qualified Graphics.Vty.Widgets.All   as UI
 import           System.Environment         (getArgs)
 import           System.Exit                (exitSuccess)
+
+import           Data.Aeson.Path
+import           Data.Aeson.Path.Parser
 
 
 -- FILTRATION
@@ -98,8 +98,9 @@ makeMessageDetailWindow = do
 
 makeFilterCreationWindow = do
   {-
-   - operator (Equals, SubString, Regex)
+   TODO:
    - sample of matching messages
+   - actually create a filter
 -}
 
   nameLabel <- UI.plainText "Filter Name:"
@@ -122,6 +123,8 @@ makeFilterCreationWindow = do
   UI.addToRadioGroup operatorRadioGroup equalsCheck
   UI.addToRadioGroup operatorRadioGroup substringCheck
   UI.addToRadioGroup operatorRadioGroup hasKeyCheck
+
+  UI.setCheckboxChecked substringCheck
   operatorRadioChecks <- UI.hBox substringCheck hasKeyCheck
   operatorRadioChecks <- UI.hBox equalsCheck operatorRadioChecks
 

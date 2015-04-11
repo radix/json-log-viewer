@@ -1,9 +1,9 @@
 module Data.Aeson.Path where
 
-import qualified Data.Text as T
-import qualified Data.Aeson as Aeson
-import qualified Data.Vector as V
+import qualified Data.Aeson          as Aeson
 import qualified Data.HashMap.Strict as HM
+import qualified Data.Text           as T
+import qualified Data.Vector         as V
 
 -- JSON PATH
 -- TODO: Make this support all of JSONPath and split it off into an Aeson.Path

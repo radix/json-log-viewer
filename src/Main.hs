@@ -4,13 +4,19 @@
 module Main where
 
 import System.Environment (getArgs)
-import Data.Aeson as Aeson
+import qualified System.Exit as Exit
+
 import Data.Maybe
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Text as Text
+import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Vector as V
 
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Encode.Pretty as AesonPretty
+
 import qualified Graphics.Vty.Widgets.All as UI
+import qualified Graphics.Vty.Input.Events as Events
 import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
@@ -87,7 +93,7 @@ getPath st = P.parse jsonPathParser "" st
 -- FILTRATION
 
 data JSONPredicate
-  = Equals Value
+  = Equals Aeson.Value
   | MatchesRegex T.Text
   | HasSubstring T.Text
   | HasKey T.Text
@@ -121,10 +127,13 @@ matchFilter _ _ = False
 {-
 
 TODO:
+- dialog box for listing, activating/deactivating filters
 - dialog box for creating a filter
 - tail a file, continuously apply filters (maybe revert to plain text for a bit
   to PoC this)
   - https://gist.github.com/ijt/1055731
+- filter persistence
+- message inspection
 - pinning lol
 
 -}
@@ -133,9 +142,7 @@ TODO:
 main = do
 
   -- examples
-  let getMessageE = getPath "$['message']"
-  putStrLn $ show getMessageE
-  Right getMessage <- return getMessageE
+  Right getMessage <- return $ getPath "$['message']"
   Right getOtterService <- return $ getPath "$['otter_service']"
   Right getOtterFacility <- return $ getPath "$['otter_facility']"
 
@@ -151,8 +158,8 @@ main = do
 
   args <- getArgs
   content <- BS.readFile (args !! 0)
-  let inputLines = BS.split 10 content -- the docs show you can do `split '\n'
-                                       -- content`, but that don't work.
+  let inputLines = BS.split 10 content -- the docs show `split '\n' content`,
+                                       -- but that don't work!
 
   -- parsing stuff
   let inputJsons = (map Aeson.decode inputLines) :: [Maybe Aeson.Value]
@@ -160,26 +167,56 @@ main = do
   let messages = catMaybes $ map (jsonPath getMessage) actualJsons
   let filteredMessages = filter (matchFilter errorsOrConverger) actualJsons
   let filteredMessagesText = map (T.pack . C8.unpack . Aeson.encode) filteredMessages
-  return "okay."
 
   -- UI stuff
-  label <- UI.plainText "Enter your name:"
-  e1 <- UI.editWidget
-  labelAndEdit <- UI.hBox label e1
-  prompt <- UI.bordered labelAndEdit
-  messageList <- UI.newTextList filteredMessagesText 1
-  promptAndList <- UI.vBox prompt messageList
-  ui <- UI.centered promptAndList
 
-  fg <- UI.newFocusGroup
-  UI.addToFocusGroup fg e1
-  UI.addToFocusGroup fg messageList
+  -- main window
+  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, DEL=Delete filter, RET=Inspect, P=Pin message, C=Create Filter"
+  borderedMainHeader <- UI.bordered mainHeader
+  messageHeader <- UI.plainText "Messages"
+  messageList <- UI.newTextList filteredMessagesText 1
+  filterHeader <- UI.plainText "Filters"
+  filterList <- UI.newTextList ["foo", "bar"] 1
+  borderedFilters <- UI.bordered filterList
+  borderedMessages <- UI.bordered messageList
+  messagesAndHeader <- UI.vBox messageHeader borderedMessages
+  filtersAndHeader <- UI.vBox filterHeader borderedFilters
+  hb <- UI.hBox filtersAndHeader messagesAndHeader
+  UI.setBoxChildSizePolicy hb $ UI.Percentage 15
+  headerAndBody <- UI.vBox borderedMainHeader hb
+  ui <- UI.centered headerAndBody
+
+  -- message detail
+  mdHeader <- UI.plainText "Message Detail. ESC=return"
+  mdHeader <- UI.bordered mdHeader
+  mdBody <- UI.plainText "Insert message here."
+  messageDetail <- UI.vBox mdHeader mdBody
+
+  mainFg <- UI.newFocusGroup
+  UI.addToFocusGroup mainFg messageList
+  UI.addToFocusGroup mainFg filterList
+
+  messageDetailFg <- UI.newFocusGroup
 
   c <- UI.newCollection
-  UI.addToCollection c ui fg
+  switchToMain <- UI.addToCollection c ui mainFg
+  switchToMessageDetail <- UI.addToCollection c messageDetail messageDetailFg
 
-  e1 `UI.onActivate` \this ->
-    UI.getEditText this >>= (error . ("You entered: " ++) . T.unpack)
+  mainFg `UI.onKeyPressed` \_ key _ ->
+    case key of
+     Events.KEsc -> Exit.exitSuccess
+     _ -> return False
+
+  messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ s _) -> do
+    let decoded = (Aeson.decode (C8.pack (T.unpack s)) :: Maybe Aeson.Value)
+    Just decoded <- return decoded
+    UI.setText mdBody $ T.pack $ C8.unpack $ AesonPretty.encodePretty decoded
+    switchToMessageDetail
+
+  messageDetailFg `UI.onKeyPressed` \_ key _ ->
+    case key of
+     Events.KEsc -> switchToMain >> return True
+     _ -> return False
 
   UI.runUi c UI.defaultContext
 

@@ -162,6 +162,16 @@ makeMessageDetailWindow = do
   return (messageDetail, mdBody)
 
 makeFilterCreationWindow = do
+  {-
+   - operator (Equals, SubString, Regex)
+   - sample of matching messages
+
+  Equals Aeson.Value -- only Text for now
+  MatchesRegex T.Text
+  HasSubstring T.Text
+  HasKey T.Text
+-}
+
   nameLabel <- UI.plainText "Filter Name:"
   nameEdit <- UI.editWidget
   nameField <- UI.hBox nameLabel nameEdit
@@ -175,6 +185,16 @@ makeFilterCreationWindow = do
   parseStatusField <- UI.hBox parseStatusLabel parseStatusText
 
   operatorLabel <- UI.plainText "Operator:"
+  operatorRadioGroup <- UI.newRadioGroup
+  equalsCheck <- UI.newCheckbox "Equals"
+  substringCheck <- UI.newCheckbox "Has Substring"
+  hasKeyCheck <- UI.newCheckbox "Has Key"
+  UI.addToRadioGroup operatorRadioGroup equalsCheck
+  UI.addToRadioGroup operatorRadioGroup substringCheck
+  UI.addToRadioGroup operatorRadioGroup hasKeyCheck
+  operatorRadioChecks <- UI.hBox substringCheck hasKeyCheck
+  operatorRadioChecks <- UI.hBox equalsCheck operatorRadioChecks
+
   operandLabel <- UI.plainText "Operand:"
   operandEdit <- UI.editWidget
   operandField <- UI.hBox operandLabel operandEdit
@@ -184,13 +204,20 @@ makeFilterCreationWindow = do
   UI.addRow dialogBody nameField
   UI.addRow dialogBody jsonPathField
   UI.addRow dialogBody parseStatusField
+  UI.addRow dialogBody operatorRadioChecks
   UI.addRow dialogBody operandField
   (filterDialog, filterFg) <- UI.newDialog dialogBody "Create New Filter"
   let filterCreationWindow = UI.dialogWidget filterDialog
 
-  let filterFocuses = [nameEdit, jsonPathEdit, operandEdit]
-  forM_ filterFocuses (flip UI.onActivate (\x -> UI.focusNext filterFg))
-  forM_ filterFocuses (UI.addToFocusGroup filterFg)
+  let returnKeyMeansNext = [nameEdit, jsonPathEdit, operandEdit]
+  forM_ returnKeyMeansNext (flip UI.onActivate (\x -> UI.focusNext filterFg))
+  UI.addToFocusGroup filterFg nameEdit
+  UI.addToFocusGroup filterFg jsonPathEdit
+  UI.addToFocusGroup filterFg equalsCheck
+  UI.addToFocusGroup filterFg equalsCheck
+  UI.addToFocusGroup filterFg substringCheck
+  UI.addToFocusGroup filterFg hasKeyCheck
+  UI.addToFocusGroup filterFg operandEdit
 
   jsonPathEdit `UI.onChange` \text -> do
     let path = getPath $ T.unpack text
@@ -238,14 +265,6 @@ main = do
   (messageDetail, mdBody) <- makeMessageDetailWindow
 
   -- filter creation window
-  {-
-   - json path
-   - operator (Equals, SubString, Regex)
-   - operand
-   - parse status
-   - sample of matching messages
-   -}
-
   (filterCreationWindow, filterNameEdit, filterFg, filterDialog) <- makeFilterCreationWindow
 
 

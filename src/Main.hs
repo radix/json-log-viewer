@@ -3,6 +3,7 @@
 
 module Main where
 
+import           Control.Monad              (forM_)
 import qualified Data.Aeson                 as Aeson
 import           Data.Aeson.Encode.Pretty   (encodePretty)
 import qualified Data.ByteString.Lazy       as BS
@@ -195,9 +196,46 @@ main = do
   -- main window
   (ui, messageList, filterList) <- makeMainWindow filteredMessagesText
 
-
-  -- message detail
+  -- message detail window
   (messageDetail, mdBody) <- makeMessageDetailWindow
+
+  -- filter creation window
+  {-
+   - json path
+   - operator (Equals, SubString, Regex)
+   - operand
+   - parse status
+   - sample of matching messages
+   -}
+  nameLabel <- UI.plainText "Filter Name:"
+  nameEdit <- UI.editWidget
+  nameField <- UI.hBox nameLabel nameEdit
+
+  jsonPathLabel <- UI.plainText "JSON Path:"
+  jsonPathEdit <- UI.editWidget
+  jsonPathField <- UI.hBox jsonPathLabel jsonPathEdit
+
+  parseStatusLabel <- UI.plainText "Parse status:"
+  parseStatusText <- UI.plainText "Please Enter a JSON Path."
+  parseStatusField <- UI.hBox parseStatusLabel parseStatusText
+
+  operatorLabel <- UI.plainText "Operator:"
+  operandLabel <- UI.plainText "Operand:"
+  operandEdit <- UI.editWidget
+  operandField <- UI.hBox operandLabel operandEdit
+
+  dialogBody <- UI.newTable [UI.column UI.ColAuto] UI.BorderNone
+
+  UI.addRow dialogBody nameField
+  UI.addRow dialogBody jsonPathField
+  UI.addRow dialogBody parseStatusField
+  UI.addRow dialogBody operandField
+  (filterDialog, filterFg) <- UI.newDialog dialogBody "Create New Filter"
+  let filterCreationWidget = UI.dialogWidget filterDialog
+
+  let filterFocuses = [nameEdit, jsonPathEdit, operandEdit]
+  forM_ filterFocuses (flip UI.onActivate (\x -> UI.focusNext filterFg))
+  forM_ filterFocuses (UI.addToFocusGroup filterFg)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList
@@ -208,10 +246,12 @@ main = do
   c <- UI.newCollection
   switchToMain <- UI.addToCollection c ui mainFg
   switchToMessageDetail <- UI.addToCollection c messageDetail messageDetailFg
+  switchToFilterCreation <- UI.addToCollection c filterCreationWidget filterFg
 
   mainFg `UI.onKeyPressed` \_ key _ ->
     case key of
      Events.KEsc -> exitSuccess
+     (Events.KChar 'f') -> UI.focus nameEdit >> switchToFilterCreation >> return True
      _ -> return False
 
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ s _) -> do
@@ -226,6 +266,10 @@ main = do
     case key of
      Events.KEsc -> switchToMain >> return True
      _ -> return False
+
+  filterDialog `UI.onDialogAccept` const switchToMain
+  filterDialog `UI.onDialogCancel` const switchToMain
+
 
   UI.runUi c UI.defaultContext
 

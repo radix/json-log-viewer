@@ -34,7 +34,7 @@ executable json-log-viewer
   -- Other library packages from which modules are imported.
   build-depends:       base >=4.8 && <4.9
                      , aeson >= 0.8.0.0
-                     , vty-ui >= 1.8
+                     , vty-ui >= 1.9
                      , vty >= 5.2.0
                      , text >= 1.2.0.0
                      , containers >= 0.5.6.0

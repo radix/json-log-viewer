@@ -142,8 +142,7 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
    TODO:
    - sample of matching messages
    - actually create a filter
--}
-
+  -}
 
   (nameEdit, nameField) <- makeEditField "Filter Name:"
   (jsonPathEdit, jsonPathField) <- makeEditField "JSON Path:"
@@ -228,7 +227,14 @@ type IsActive = Bool
 
 
 -- TODO: Is it okay to use C8.unpack?
+jsonToText :: Aeson.Value -> T.Text
 jsonToText = (T.pack . C8.unpack . Aeson.encode)
+
+removeSlice :: Int -> Int -> [a] -> [a]
+removeSlice n m xs = take n xs ++ drop m xs
+
+removeIndex :: Int -> [a] -> [a]
+removeIndex n xs = removeSlice n (n+1) xs
 
 main = do
 
@@ -299,6 +305,23 @@ main = do
     let pretty = T.pack $ C8.unpack $ encodePretty message
     UI.setText mdBody pretty
     switchToMessageDetail
+
+  filterList `UI.onItemActivated` \(UI.ActivateItemEvent _ filt _) -> do
+    error $ show filt
+
+  filterList `UI.onKeyPressed` \_ key _ -> do
+    case key of
+     (Events.KChar 'd') -> do
+       selected <- UI.getSelected filterList
+       case selected of
+        Just (index, (item, widg)) -> do
+          UI.removeFromList filterList index
+          modifyIORef filtersRef (removeIndex index)
+          refreshMessages
+          return True
+        Nothing -> return False
+     _ -> return False
+
 
   messageDetailFg `UI.onKeyPressed` \_ key _ ->
     case key of

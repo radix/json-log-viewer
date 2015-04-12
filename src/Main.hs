@@ -11,7 +11,8 @@ import           Data.Aeson.Encode.Pretty   (encodePretty)
 import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
 import qualified Data.HashMap.Strict        as HM
-import           Data.IORef
+import           Data.IORef                 (modifyIORef, newIORef, readIORef,
+                                             writeIORef)
 import           Data.Maybe                 (catMaybes, maybe)
 import qualified Data.Text                  as T
 import qualified Graphics.Vty.Input.Events  as Events
@@ -66,6 +67,7 @@ TODO:
 - grouping filters (any and all)
 - tail a file, continuously apply filters
   - https://gist.github.com/ijt/1055731
+- reading input from a file descriptor
 - filter persistence
 - pinning messages prevents them from scrolling off :S
 - tabbing between message and  filter lists doesn't have visual indicator
@@ -75,6 +77,20 @@ TODO:
 filterMessages :: [(IsPinned, Aeson.Value)] -> [Filter] -> [Aeson.Value]
 filterMessages messages filters = map snd $ filter filt messages
   where filt (pinned, json) = pinned || matchFilter (AllFilters filters) json
+
+
+
+-- UI!
+
+makeField labelText widget = do
+  label <- UI.plainText labelText
+  field <- UI.hBox label widget
+  return field
+
+makeEditField labelText = do
+  edit <- UI.editWidget
+  field <- makeField labelText edit
+  return (edit, field)
 
 
 makeMainWindow messagesRef filtersRef = do
@@ -121,24 +137,18 @@ makeMessageDetailWindow = do
   messageDetail <- UI.vBox mdHeader mdBody
   return (messageDetail, mdBody)
 
-makeFilterCreationWindow = do
+makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
   {-
    TODO:
    - sample of matching messages
    - actually create a filter
 -}
 
-  nameLabel <- UI.plainText "Filter Name:"
-  nameEdit <- UI.editWidget
-  nameField <- UI.hBox nameLabel nameEdit
 
-  jsonPathLabel <- UI.plainText "JSON Path:"
-  jsonPathEdit <- UI.editWidget
-  jsonPathField <- UI.hBox jsonPathLabel jsonPathEdit
-
-  parseStatusLabel <- UI.plainText "Parse status:"
+  (nameEdit, nameField) <- makeEditField "Filter Name:"
+  (jsonPathEdit, jsonPathField) <- makeEditField "JSON Path:"
   parseStatusText <- UI.plainText "Please Enter a JSON Path."
-  parseStatusField <- UI.hBox parseStatusLabel parseStatusText
+  parseStatusField <- makeField "Parse status:" parseStatusText
 
   operatorLabel <- UI.plainText "Operator:"
   operatorRadioGroup <- UI.newRadioGroup
@@ -153,9 +163,7 @@ makeFilterCreationWindow = do
   operatorRadioChecks <- UI.hBox substringCheck hasKeyCheck
   operatorRadioChecks <- UI.hBox equalsCheck operatorRadioChecks
 
-  operandLabel <- UI.plainText "Operand:"
-  operandEdit <- UI.editWidget
-  operandField <- UI.hBox operandLabel operandEdit
+  (operandEdit, operandField) <- makeEditField "Operand:"
 
   dialogBody <- UI.newTable [UI.column UI.ColAuto] UI.BorderNone
   let addRow = UI.addRow dialogBody
@@ -185,10 +193,38 @@ makeFilterCreationWindow = do
      (Left error) -> UI.setText parseStatusText $ T.pack $ show error
      (Right parse) -> UI.setText parseStatusText "Valid! :-)"
 
+  filterFg `UI.onKeyPressed` \_ key _ ->
+    case key of
+     Events.KEsc -> UI.cancelDialog filterDialog >> return True
+     _ -> return False
+
+  filterDialog `UI.onDialogAccept` \_ -> do
+    pathText <- UI.getEditText jsonPathEdit
+    operand <- UI.getEditText operandEdit
+    currentRadio <- UI.getCurrentRadio operatorRadioGroup
+    let predicate = case currentRadio of
+          Just rButton
+            | rButton == equalsCheck -> Equals $ Aeson.String operand
+            | rButton == substringCheck -> HasSubstring operand
+            | rButton == hasKeyCheck -> HasKey operand
+          _ -> error "shouldn't happen because there's a default"
+    let mpath = getPath $ T.unpack pathText
+    case mpath of
+     Right path -> do
+       let filt = Filter path predicate
+       modifyIORef filtersRef (filt:)
+       refreshMessages
+       switchToMain
+     Left e -> return ()
+
+  filterDialog `UI.onDialogCancel` \_ -> do
+    switchToMain
+
   return (filterCreationWindow, nameEdit, filterFg, filterDialog)
 
 
 type IsPinned = Bool
+type IsActive = Bool
 
 
 -- TODO: Is it okay to use C8.unpack?
@@ -217,7 +253,6 @@ main = do
                                        -- but that don't work!
 
   -- parsing stuff
-  -- this seems like WAY too much work...
   let inputJsons = (map Aeson.decode inputLines) :: [Maybe Aeson.Value]
   let messages = catMaybes inputJsons
 
@@ -233,42 +268,31 @@ main = do
   writeIORef filtersRef [errorsOrConverger]
   (ui, messageList, filterList, refreshMessages) <- makeMainWindow messagesRef filtersRef
 
-  -- refreshMessages
-
-{-
-
-Okay, so we need a global `messages` [(IsPinned, Aeson.Value)]
-We also need a global `filters` [Filter]
-
-When a message comes in, we add it to `messages`, check it against all filters
-in the `filters` and add it to the list widget if it matches. Easy peasy.
-
-When we _change_ the filters, I think we have to clear the whole widget and
-reprocess all of `messages`, and we can leave `pinned` in place.
-
--}
-
-  -- message detail window
-  (messageDetail, mdBody) <- makeMessageDetailWindow
-
-  -- filter creation window
-  (filterCreationWindow, filterNameEdit, filterFg, filterDialog) <- makeFilterCreationWindow
-
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList
   UI.addToFocusGroup mainFg filterList
-
-  messageDetailFg <- UI.newFocusGroup
-
   c <- UI.newCollection
   switchToMain <- UI.addToCollection c ui mainFg
+
+  -- message detail window
+  (messageDetail, mdBody) <- makeMessageDetailWindow
+  messageDetailFg <- UI.newFocusGroup
   switchToMessageDetail <- UI.addToCollection c messageDetail messageDetailFg
+
+  -- filter creation window
+  (filterCreationWindow,
+   filterNameEdit,
+   filterFg,
+   filterDialog) <- makeFilterCreationWindow filtersRef refreshMessages switchToMain
   switchToFilterCreation <- UI.addToCollection c filterCreationWindow filterFg
 
   mainFg `UI.onKeyPressed` \_ key _ ->
     case key of
      Events.KEsc -> exitSuccess
-     (Events.KChar 'f') -> UI.focus filterNameEdit >> switchToFilterCreation >> return True
+     (Events.KChar 'f') -> do
+       UI.focus filterNameEdit
+       switchToFilterCreation
+       return True
      _ -> return False
 
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ message _) -> do
@@ -280,8 +304,5 @@ reprocess all of `messages`, and we can leave `pinned` in place.
     case key of
      Events.KEsc -> switchToMain >> return True
      _ -> return False
-
-  filterDialog `UI.onDialogAccept` const switchToMain
-  filterDialog `UI.onDialogCancel` const switchToMain
 
   UI.runUi c UI.defaultContext

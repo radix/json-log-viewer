@@ -1,6 +1,7 @@
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE PatternGuards             #-}
+{-# LANGUAGE TupleSections             #-}
 
 module Main where
 
@@ -10,6 +11,7 @@ import           Data.Aeson.Encode.Pretty   (encodePretty)
 import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
 import qualified Data.HashMap.Strict        as HM
+import           Data.IORef
 import           Data.Maybe                 (catMaybes, maybe)
 import qualified Data.Text                  as T
 import qualified Graphics.Vty.Input.Events  as Events
@@ -58,26 +60,30 @@ matchFilter _ _ = False
 {-
 
 TODO:
-- dialog box for listing, activating/deactivating filters
-- dialog box for creating a filter
-- tail a file, continuously apply filters (maybe revert to plain text for a bit
-  to PoC this)
+- activating/deactivating filters
+- RET on filter = edit filter
+- filter names
+- grouping filters (any and all)
+- tail a file, continuously apply filters
   - https://gist.github.com/ijt/1055731
 - filter persistence
-- message inspection
-- pinning lol
-
+- pinning messages prevents them from scrolling off :S
+- tabbing between message and  filter lists doesn't have visual indicator
 -}
 
 
+filterMessages :: [(IsPinned, Aeson.Value)] -> [Filter] -> [Aeson.Value]
+filterMessages messages filters = map snd $ filter filt messages
+  where filt (pinned, json) = pinned || matchFilter (AllFilters filters) json
 
-makeMainWindow filteredMessagesText = do
+
+makeMainWindow messagesRef filtersRef = do
   mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, DEL=Delete filter, RET=Inspect, P=Pin message, C=Create Filter"
   borderedMainHeader <- UI.bordered mainHeader
   messageHeader <- UI.plainText "Messages"
-  messageList <- UI.newTextList filteredMessagesText 1
+  messageList <- UI.newList 1
   filterHeader <- UI.plainText "Filters"
-  filterList <- UI.newTextList ["foo", "bar"] 1
+  filterList <- UI.newList 1
   borderedFilters <- UI.bordered filterList
   borderedMessages <- UI.bordered messageList
   messagesAndHeader <- UI.vBox messageHeader borderedMessages
@@ -86,7 +92,26 @@ makeMainWindow filteredMessagesText = do
   UI.setBoxChildSizePolicy hb $ UI.Percentage 15
   headerAndBody <- UI.vBox borderedMainHeader hb
   ui <- UI.centered headerAndBody
-  return (ui, messageList, filterList)
+  let refreshMessages = do
+        messages <- readIORef messagesRef
+        filters <- readIORef filtersRef
+        -- update filters list
+        let addToFiltersList filter = do
+              txtWidg <- UI.plainText $ T.pack $ show filter
+              UI.addToList filterList filter txtWidg
+        UI.clearList filterList
+        mapM_ addToFiltersList filters
+        -- update messages list
+        let filteredMessages = filterMessages messages filters
+        UI.clearList messageList
+        let addToList message = do
+              let line = jsonToText message
+              txtWidg <- UI.plainText line
+              UI.addToList messageList message txtWidg
+        mapM_ addToList filteredMessages
+
+  refreshMessages
+  return (ui, messageList, filterList, refreshMessages)
 
 
 makeMessageDetailWindow = do
@@ -162,6 +187,13 @@ makeFilterCreationWindow = do
 
   return (filterCreationWindow, nameEdit, filterFg, filterDialog)
 
+
+type IsPinned = Bool
+
+
+-- TODO: Is it okay to use C8.unpack?
+jsonToText = (T.pack . C8.unpack . Aeson.encode)
+
 main = do
 
   -- examples
@@ -185,23 +217,42 @@ main = do
                                        -- but that don't work!
 
   -- parsing stuff
+  -- this seems like WAY too much work...
   let inputJsons = (map Aeson.decode inputLines) :: [Maybe Aeson.Value]
-  let actualJsons = catMaybes inputJsons
-  let messages = catMaybes $ map (jsonPath getMessage) actualJsons
-  let filteredMessages = filter (matchFilter errorsOrConverger) actualJsons
-  let filteredMessagesText = map (T.pack . C8.unpack . Aeson.encode) filteredMessages
+  let messages = catMaybes inputJsons
+
+  -- Global Messages and Filters
+
+  messagesRef <- newIORef ([] :: [(IsPinned, Aeson.Value)])
+  filtersRef <- newIORef ([] :: [Filter])
 
   -- UI stuff
 
   -- main window
-  (ui, messageList, filterList) <- makeMainWindow filteredMessagesText
+  writeIORef messagesRef $ map (False,) messages
+  writeIORef filtersRef [errorsOrConverger]
+  (ui, messageList, filterList, refreshMessages) <- makeMainWindow messagesRef filtersRef
+
+  -- refreshMessages
+
+{-
+
+Okay, so we need a global `messages` [(IsPinned, Aeson.Value)]
+We also need a global `filters` [Filter]
+
+When a message comes in, we add it to `messages`, check it against all filters
+in the `filters` and add it to the list widget if it matches. Easy peasy.
+
+When we _change_ the filters, I think we have to clear the whole widget and
+reprocess all of `messages`, and we can leave `pinned` in place.
+
+-}
 
   -- message detail window
   (messageDetail, mdBody) <- makeMessageDetailWindow
 
   -- filter creation window
   (filterCreationWindow, filterNameEdit, filterFg, filterDialog) <- makeFilterCreationWindow
-
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList
@@ -220,12 +271,9 @@ main = do
      (Events.KChar 'f') -> UI.focus filterNameEdit >> switchToFilterCreation >> return True
      _ -> return False
 
-  messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ s _) -> do
-    let decoded = (Aeson.decode (C8.pack (T.unpack s)) :: Maybe Aeson.Value)
-    let decodingError = "can't decode json even though I already did?"
-    let prettyPrint = \json -> do
-          T.pack $ C8.unpack $ encodePretty decoded
-    UI.setText mdBody $ maybe decodingError prettyPrint decoded
+  messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ message _) -> do
+    let pretty = T.pack $ C8.unpack $ encodePretty message
+    UI.setText mdBody pretty
     switchToMessageDetail
 
   messageDetailFg `UI.onKeyPressed` \_ key _ ->

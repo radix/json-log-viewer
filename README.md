@@ -1,2 +1,2 @@
-# json_log_viewer
+# json-log-viewer
 (no code yet) a JSON log viewer.

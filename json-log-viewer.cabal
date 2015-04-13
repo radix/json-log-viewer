@@ -4,7 +4,7 @@
 name:                json-log-viewer
 version:             0.0.1
 synopsis:            Structured JSON log viewer with filtering
-homepage:            https://github.com/radix/json_log_viewer
+homepage:            https://github.com/radix/json-log-viewer
 license:             MIT
 license-file:        LICENSE
 author:              Christopher Armstrong

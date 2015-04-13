@@ -237,24 +237,17 @@ removeIndex :: Int -> [a] -> [a]
 removeIndex n xs = removeSlice n (n+1) xs
 
 main = do
-
-  -- examples
-  Right getMessage <- return $ getPath "$['message']"
-  Right getOtterService <- return $ getPath "$['otter_service']"
-  Right getOtterFacility <- return $ getPath "$['otter_facility']"
-
-  let convergerFilter = Filter getOtterService (Equals "converger")
-  let kazooFilter = Filter getOtterFacility (Equals "kazoo")
-  let kazooSends = AllFilters [
-        kazooFilter,
-        (Filter getMessage (HasSubstring "Sending request"))]
-
-  let errorsOrConverger = AnyFilter [
-        convergerFilter,
-        (Filter Yield (HasKey "exception_type"))]
-
   args <- getArgs
-  content <- BS.readFile (args !! 0)
+  let usage = "json-log-viewer [filename]\n\
+              \json-log-viewer --fd3\n\
+              \If --fd3 is passed, log data will be read from FD 3."
+  content <- case args of
+   [] -> error usage
+   ["-h"] -> error usage
+   ["--help"] -> error usage
+   ["--fd3"] -> error "not yet implemented"
+   [filename] -> BS.readFile filename
+   _ -> error usage
   let inputLines = BS.split 10 content -- the docs show `split '\n' content`,
                                        -- but that don't work!
 
@@ -271,7 +264,6 @@ main = do
 
   -- main window
   writeIORef messagesRef $ map (False,) messages
-  writeIORef filtersRef [errorsOrConverger]
   (ui, messageList, filterList, refreshMessages) <- makeMainWindow messagesRef filtersRef
 
   mainFg <- UI.newFocusGroup

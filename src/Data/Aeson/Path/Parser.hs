@@ -34,7 +34,7 @@ jsonPathParser = dollar *> pathItems
     quotedAttribute  = P.between quote quote str
     selectIndex      = SelectIndex <$> number
     selectKey        = (SelectKey . T.pack) <$> quotedAttribute
-    selector         = selectIndex P.<|> selectKey
+    selector         = (selectIndex P.<|> selectKey) P.<?> "integer or single-quoted string"
     selectorBrackets = P.between (P.char '[') (P.char ']') selector
 
     -- The fun/tricky bit: `select` results in a *partially applied* `Select`,

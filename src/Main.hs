@@ -95,26 +95,26 @@ makeMainWindow messagesRef filtersRef = do
 
   messageList `UI.onKeyPressed` \_ key _ ->
     case key of
-    Events.KHome -> UI.scrollToBeginning messageList >> return True
-    Events.KEnd -> UI.scrollToEnd messageList >> return True
-    _ -> return False
+      Events.KHome -> UI.scrollToBeginning messageList >> return True
+      Events.KEnd -> UI.scrollToEnd messageList >> return True
+      _ -> return False
 
   filterList `UI.onKeyPressed` \_ key _ ->
     case key of
-    Events.KHome -> UI.scrollToBeginning filterList >> return True
-    Events.KEnd -> UI.scrollToEnd filterList >> return True
-    _ -> return False
+      Events.KHome -> UI.scrollToBeginning filterList >> return True
+      Events.KEnd -> UI.scrollToEnd filterList >> return True
+      _ -> return False
 
   let refreshMessages = do
         messages <- readIORef messagesRef
-        filters <- readIORef filtersRef
+        namesAndFilters <- readIORef filtersRef
         -- update filters list
-        filterWidgets <- mapM (UI.plainText . T.pack . show) filters
-        let filterItems = zip filters filterWidgets
+        filterWidgets <- mapM (UI.plainText . fst) namesAndFilters
+        let filterItems = zip (map snd namesAndFilters) filterWidgets
         UI.clearList filterList
         UI.addMultipleToList filterList filterItems
         -- update messages list
-        let filteredMessages = filterMessages messages filters
+        let filteredMessages = filterMessages messages (map snd namesAndFilters)
         UI.clearList messageList
         messageWidgets <- mapM (UI.plainText . jsonToText) filteredMessages
         let messageItems = zip filteredMessages messageWidgets
@@ -189,6 +189,7 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
     pathText <- UI.getEditText jsonPathEdit
     operand <- UI.getEditText operandEdit
     currentRadio <- UI.getCurrentRadio operatorRadioGroup
+    nameText <- UI.getEditText nameEdit
     let predicate = case currentRadio of
           Just rButton
             | rButton == equalsCheck -> Equals $ Aeson.String operand
@@ -199,7 +200,7 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
     case mpath of
      Right path -> do
        let filt = Filter path predicate
-       modifyIORef filtersRef (filt:)
+       modifyIORef filtersRef ((nameText, filt):)
        refreshMessages
        switchToMain
      Left e -> return ()
@@ -212,6 +213,7 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
 
 type IsPinned = Bool
 type IsActive = Bool
+type FilterName = T.Text
 
 
 -- TODO: Is it okay to use C8.unpack?
@@ -246,7 +248,7 @@ main = do
   -- Global Messages and Filters
 
   messagesRef <- newIORef ([] :: [(IsPinned, Aeson.Value)])
-  filtersRef <- newIORef ([] :: [Filter])
+  filtersRef <- newIORef ([] :: [(FilterName, Filter)])
 
   -- UI stuff
 

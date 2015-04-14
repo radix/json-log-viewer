@@ -1,13 +1,13 @@
-{-# LANGUAGE OverloadedStrings         #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Main where
 
-import qualified Data.Text as T
-import Control.Monad
-import qualified Graphics.Vty.Input.Events  as Events
-import qualified Graphics.Vty.Widgets.All   as UI
-import           System.Exit                (exitSuccess)
-import           System.Environment         (getArgs)
+import           Control.Monad
+import qualified Data.Text                 as T
+import qualified Graphics.Vty.Input.Events as Events
+import qualified Graphics.Vty.Widgets.All  as UI
+import           System.Environment        (getArgs)
+import           System.Exit               (exitSuccess)
 
 
 main = do

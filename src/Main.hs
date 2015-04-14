@@ -58,22 +58,6 @@ matchFilter (AnyFilter filters) aesonValue = any (flip matchFilter aesonValue) f
 matchFilter _ _ = False
 
 
-{-
-
-TODO:
-- activating/deactivating filters
-- RET on filter = edit filter
-- filter names
-- grouping filters (any and all)
-- tail a file, continuously apply filters
-  - https://gist.github.com/ijt/1055731
-- reading input from a file descriptor
-- filter persistence
-- pinning messages prevents them from scrolling off :S
-- tabbing between message and  filter lists doesn't have visual indicator
--}
-
-
 filterMessages :: [(IsPinned, Aeson.Value)] -> [Filter] -> [Aeson.Value]
 filterMessages messages filters = map snd $ filter filt messages
   where filt (pinned, json) = pinned || matchFilter (AllFilters filters) json
@@ -108,23 +92,33 @@ makeMainWindow messagesRef filtersRef = do
   UI.setBoxChildSizePolicy hb $ UI.Percentage 15
   headerAndBody <- UI.vBox borderedMainHeader hb
   ui <- UI.centered headerAndBody
+
+  messageList `UI.onKeyPressed` \_ key _ ->
+    case key of
+    Events.KHome -> UI.scrollToBeginning messageList >> return True
+    Events.KEnd -> UI.scrollToEnd messageList >> return True
+    _ -> return False
+
+  filterList `UI.onKeyPressed` \_ key _ ->
+    case key of
+    Events.KHome -> UI.scrollToBeginning filterList >> return True
+    Events.KEnd -> UI.scrollToEnd filterList >> return True
+    _ -> return False
+
   let refreshMessages = do
         messages <- readIORef messagesRef
         filters <- readIORef filtersRef
         -- update filters list
-        let addToFiltersList filter = do
-              txtWidg <- UI.plainText $ T.pack $ show filter
-              UI.addToList filterList filter txtWidg
+        filterWidgets <- mapM (UI.plainText . T.pack . show) filters
+        let filterItems = zip filters filterWidgets
         UI.clearList filterList
-        mapM_ addToFiltersList filters
+        UI.addMultipleToList filterList filterItems
         -- update messages list
         let filteredMessages = filterMessages messages filters
         UI.clearList messageList
-        let addToList message = do
-              let line = jsonToText message
-              txtWidg <- UI.plainText line
-              UI.addToList messageList message txtWidg
-        mapM_ addToList filteredMessages
+        messageWidgets <- mapM (UI.plainText . jsonToText) filteredMessages
+        let messageItems = zip filteredMessages messageWidgets
+        UI.addMultipleToList messageList messageItems
 
   refreshMessages
   return (ui, messageList, filterList, refreshMessages)
@@ -138,12 +132,6 @@ makeMessageDetailWindow = do
   return (messageDetail, mdBody)
 
 makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
-  {-
-   TODO:
-   - sample of matching messages
-   - actually create a filter
-  -}
-
   (nameEdit, nameField) <- makeEditField "Filter Name:"
   (jsonPathEdit, jsonPathField) <- makeEditField "JSON Path:"
   parseStatusText <- UI.plainText "Please Enter a JSON Path."

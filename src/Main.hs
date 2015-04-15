@@ -321,6 +321,12 @@ main = do
        modifyIORef followingRef not
        UI.scrollToEnd messageList
        return True
+     (Events.KChar 'j') -> do
+       UI.scrollDown messageList
+       return True
+     (Events.KChar 'k') -> do
+       UI.scrollUp messageList
+       return True
      _ -> return False
 
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ message _) -> do

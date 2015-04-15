@@ -5,17 +5,17 @@
 
 module Main where
 
-import           Control.Concurrent         (threadDelay)
+import           Control.Concurrent         (forkIO, threadDelay)
 import           Control.Concurrent.MVar    (MVar (..), putMVar, takeMVar)
 import           Control.Exception          (tryJust)
-import           Control.Monad              (forM_, forever, guard)
+import           Control.Monad              (forM_, forever, guard, when)
 import qualified Data.Aeson                 as Aeson
 import           Data.Aeson.Encode.Pretty   (encodePretty)
 import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
 import qualified Data.HashMap.Strict        as HM
-import           Data.IORef                 (modifyIORef, newIORef, readIORef,
-                                             writeIORef)
+import           Data.IORef                 (IORef, modifyIORef, newIORef,
+                                             readIORef, writeIORef)
 import           Data.Maybe                 (catMaybes, maybe)
 import qualified Data.Text                  as T
 import qualified Graphics.Vty.Input.Events  as Events
@@ -227,32 +227,54 @@ removeSlice n m xs = take n xs ++ drop m xs
 removeIndex :: Int -> [a] -> [a]
 removeIndex n = removeSlice n (n+1)
 
+type MessagesRef = IORef [(IsPinned, Aeson.Value)]
+type FiltersRef = IORef [(FilterName, Filter)]
+
+
+messageReceived
+  :: MessagesRef
+  -> FiltersRef
+  -> IO () -- ^ the refreshMessages function
+  -> Either String BS.ByteString -- ^ the new line
+  -> IO ()
+messageReceived messagesRef filtersRef refreshMessages newline =
+  -- potential for race condition here I think!
+  -- hmm, or not, since this will be run in the vty-ui event loop.
+  case newline of
+    Right newline -> do
+      filters <- map snd <$> readIORef filtersRef
+      let value = Aeson.decode newline
+      case value of
+       Just json ->
+         when (matchFilter (AllFilters filters) json) (do
+           modifyIORef messagesRef (++ [(False, json)]) -- lol use a vector scrub
+           refreshMessages)
+       Nothing -> return ()
+    Left message -> error message
+
+
+usage = "json-log-viewer [filename]"
+
 main = do
   args <- getArgs
-  let usage = "json-log-viewer [filename]"
-  content <- case args of
-   [] -> error usage
-   ["-h"] -> error usage
-   ["--help"] -> error usage
-   [filename] -> BS.readFile filename
-   _ -> error usage
-  let inputLines = BS.split 10 content -- the docs show `split '\n' content`,
-                                       -- but that don't work!
-
-  -- parsing stuff
-  let inputJsons = map Aeson.decode inputLines :: [Maybe Aeson.Value]
-  let messages = catMaybes inputJsons
+  let filename = case args of
+        [] -> error usage
+        ["-h"] -> error usage
+        ["--help"] -> error usage
+        [filename] -> filename
+        _ -> error usage
 
   -- Global Messages and Filters
 
-  messagesRef <- newIORef ([] :: [(IsPinned, Aeson.Value)])
-  filtersRef <- newIORef ([] :: [(FilterName, Filter)])
+  messagesRef <- newIORef [] :: IO MessagesRef
+  filtersRef <- newIORef [] :: IO FiltersRef
 
   -- UI stuff
 
   -- main window
-  writeIORef messagesRef $ map (False,) messages
   (ui, messageList, filterList, refreshMessages) <- makeMainWindow messagesRef filtersRef
+
+  forkIO $ streamLines filename 0 1000000 (UI.schedule . messageReceived messagesRef filtersRef refreshMessages)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList

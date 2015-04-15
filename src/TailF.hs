@@ -50,5 +50,5 @@ streamLines path sizeSoFar delay callback = go sizeSoFar
            let startNext = newSize - (toInteger $ BS.length $ last lines)
            mapM_ (callback . Right) $ init lines
            go startNext
-         else do
+         else
            go sizeSoFar

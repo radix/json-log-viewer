@@ -29,8 +29,8 @@ jsonPathParser = dollar *> pathItems
   where
     dollar           = P.char '$'
     quote            = P.char '\''
-    number           = read <$> (P.many1 $ P.oneOf "0123456789")
-    str              = (P.many $ P.noneOf "'")
+    number           = read <$> P.many1 (P.oneOf "0123456789")
+    str              = P.many $ P.noneOf "'"
     quotedAttribute  = P.between quote (quote P.<?> "single-quoted key name") str
     selectIndex      = SelectIndex <$> number
     selectKey        = (SelectKey . T.pack) <$> quotedAttribute
@@ -40,9 +40,9 @@ jsonPathParser = dollar *> pathItems
     -- The fun/tricky bit: `select` results in a *partially applied* `Select`,
     -- and it is filled in with the remaining JSONPath in the recursive
     -- `pathItems`.
-    yield            = (const Yield) <$> P.eof
+    yield            = const Yield <$> P.eof
     select           = Select <$> selectorBrackets
     pathItems        = yield P.<|> (select <*> pathItems)
 
 getPath :: String -> Either P.ParseError JSONPath
-getPath st = P.parse jsonPathParser "" st
+getPath = P.parse jsonPathParser ""

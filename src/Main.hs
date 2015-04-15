@@ -5,7 +5,10 @@
 
 module Main where
 
-import           Control.Monad              (forM_)
+import           Control.Concurrent         (threadDelay)
+import           Control.Concurrent.MVar    (MVar (..), putMVar, takeMVar)
+import           Control.Exception          (tryJust)
+import           Control.Monad              (forM_, forever, guard)
 import qualified Data.Aeson                 as Aeson
 import           Data.Aeson.Encode.Pretty   (encodePretty)
 import qualified Data.ByteString.Lazy       as BS
@@ -19,10 +22,15 @@ import qualified Graphics.Vty.Input.Events  as Events
 import qualified Graphics.Vty.Widgets.All   as UI
 import           System.Environment         (getArgs)
 import           System.Exit                (exitSuccess)
+import           System.IO                  (IOMode (ReadMode),
+                                             SeekMode (AbsoluteSeek), hSeek,
+                                             openFile)
+import           System.IO.Error            (isDoesNotExistError)
+import           System.Posix.Files         (fileSize, getFileStatus)
 
 import           Data.Aeson.Path
 import           Data.Aeson.Path.Parser
-
+import           TailF                      (streamLines)
 
 -- FILTRATION
 
@@ -49,12 +57,9 @@ matchPredicate _ _ = False
 matchFilter :: Filter -> Aeson.Value -> Bool
 matchFilter (Filter jspath predicate) aesonValue
   | Just gotValue <- jsonPath jspath aesonValue
-    = if predicate `matchPredicate` gotValue then
-        True
-      else
-        False
-matchFilter (AllFilters filters) aesonValue = all (flip matchFilter aesonValue) filters
-matchFilter (AnyFilter filters) aesonValue = any (flip matchFilter aesonValue) filters
+    = predicate `matchPredicate` gotValue
+matchFilter (AllFilters filters) aesonValue = all (`matchFilter` aesonValue) filters
+matchFilter (AnyFilter filters) aesonValue = any (`matchFilter` aesonValue) filters
 matchFilter _ _ = False
 
 
@@ -63,19 +68,22 @@ filterMessages messages filters = map snd $ filter filt messages
   where filt (pinned, json) = pinned || matchFilter (AllFilters filters) json
 
 
+-- purely informative type synonyms
+type IsPinned = Bool
+type IsActive = Bool
+type FilterName = T.Text
 
--- UI!
+
+-- UI code. It's groooooss.
 
 makeField labelText widget = do
   label <- UI.plainText labelText
-  field <- UI.hBox label widget
-  return field
+  UI.hBox label widget
 
 makeEditField labelText = do
   edit <- UI.editWidget
   field <- makeField labelText edit
   return (edit, field)
-
 
 makeMainWindow messagesRef filtersRef = do
   mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, DEL=Delete filter, RET=Inspect, P=Pin message, C=Create Filter"
@@ -123,7 +131,6 @@ makeMainWindow messagesRef filtersRef = do
   refreshMessages
   return (ui, messageList, filterList, refreshMessages)
 
-
 makeMessageDetailWindow = do
   mdHeader <- UI.plainText "Message Detail. ESC=return"
   mdHeader <- UI.bordered mdHeader
@@ -164,7 +171,7 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
   let filterCreationWindow = UI.dialogWidget filterDialog
 
   let returnKeyMeansNext = [nameEdit, jsonPathEdit, operandEdit]
-  forM_ returnKeyMeansNext (flip UI.onActivate (\x -> UI.focusNext filterFg))
+  forM_ returnKeyMeansNext (`UI.onActivate` (\x -> UI.focusNext filterFg))
 
   let addFocus = UI.addToFocusGroup filterFg
   addFocus nameEdit
@@ -205,44 +212,35 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
        switchToMain
      Left e -> return ()
 
-  filterDialog `UI.onDialogCancel` \_ -> do
-    switchToMain
+  filterDialog `UI.onDialogCancel` const switchToMain
 
   return (filterCreationWindow, nameEdit, filterFg, filterDialog)
 
 
-type IsPinned = Bool
-type IsActive = Bool
-type FilterName = T.Text
-
-
 -- TODO: Is it okay to use C8.unpack?
 jsonToText :: Aeson.Value -> T.Text
-jsonToText = (T.pack . C8.unpack . Aeson.encode)
+jsonToText = T.pack . C8.unpack . Aeson.encode
 
 removeSlice :: Int -> Int -> [a] -> [a]
 removeSlice n m xs = take n xs ++ drop m xs
 
 removeIndex :: Int -> [a] -> [a]
-removeIndex n xs = removeSlice n (n+1) xs
+removeIndex n = removeSlice n (n+1)
 
 main = do
   args <- getArgs
-  let usage = "json-log-viewer [filename]\n\
-              \json-log-viewer --fd3\n\
-              \If --fd3 is passed, log data will be read from FD 3."
+  let usage = "json-log-viewer [filename]"
   content <- case args of
    [] -> error usage
    ["-h"] -> error usage
    ["--help"] -> error usage
-   ["--fd3"] -> error "not yet implemented"
    [filename] -> BS.readFile filename
    _ -> error usage
   let inputLines = BS.split 10 content -- the docs show `split '\n' content`,
                                        -- but that don't work!
 
   -- parsing stuff
-  let inputJsons = (map Aeson.decode inputLines) :: [Maybe Aeson.Value]
+  let inputJsons = map Aeson.decode inputLines :: [Maybe Aeson.Value]
   let messages = catMaybes inputJsons
 
   -- Global Messages and Filters
@@ -288,10 +286,10 @@ main = do
     UI.setText mdBody pretty
     switchToMessageDetail
 
-  filterList `UI.onItemActivated` \(UI.ActivateItemEvent _ filt _) -> do
+  filterList `UI.onItemActivated` \(UI.ActivateItemEvent _ filt _) ->
     error $ show filt
 
-  filterList `UI.onKeyPressed` \_ key _ -> do
+  filterList `UI.onKeyPressed` \_ key _ ->
     case key of
      (Events.KChar 'd') -> do
        selected <- UI.getSelected filterList

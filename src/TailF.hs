@@ -29,8 +29,8 @@ streamLines
   -> FilePosition -- ^ Position in the file to start reading at. Very likely
                   -- you want to pass 0.
   -> MicroSeconds -- ^ delay between each check of the file in microseconds
-  -> (Either String BS.ByteString -> IO ()) -- ^ function to be called with
-                                            -- each new complete line
+  -> (Either String [BS.ByteString] -> IO ()) -- ^ function to be called with
+                                              -- the new complete lines
   -> IO ()
 streamLines path sizeSoFar delay callback = go sizeSoFar
   where
@@ -48,7 +48,7 @@ streamLines path sizeSoFar delay callback = go sizeSoFar
            newContents <- BS.hGetContents handle
            let lines = BS.splitWith (==10) newContents
            let startNext = newSize - (toInteger $ BS.length $ last lines)
-           mapM_ (callback . Right) $ init lines
+           callback $ Right $ init lines
            go startNext
          else
            go sizeSoFar

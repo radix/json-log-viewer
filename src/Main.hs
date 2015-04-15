@@ -1,5 +1,7 @@
+{-# LANGUAGE NamedWildCards            #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedStrings         #-}
+{-# LANGUAGE PartialTypeSignatures     #-}
 {-# LANGUAGE PatternGuards             #-}
 {-# LANGUAGE TupleSections             #-}
 
@@ -13,10 +15,12 @@ import qualified Data.Aeson                 as Aeson
 import           Data.Aeson.Encode.Pretty   (encodePretty)
 import qualified Data.ByteString.Lazy       as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
+import           Data.Foldable              (toList)
 import qualified Data.HashMap.Strict        as HM
 import           Data.IORef                 (IORef, modifyIORef, newIORef,
                                              readIORef, writeIORef)
 import           Data.Maybe                 (catMaybes, maybe)
+import qualified Data.Sequence              as Seq
 import qualified Data.Text                  as T
 import qualified Graphics.Vty.Input.Events  as Events
 import qualified Graphics.Vty.Widgets.All   as UI
@@ -63,8 +67,8 @@ matchFilter (AnyFilter filters) aesonValue = any (`matchFilter` aesonValue) filt
 matchFilter _ _ = False
 
 
-filterMessages :: [(IsPinned, Aeson.Value)] -> [Filter] -> [Aeson.Value]
-filterMessages messages filters = map snd $ filter filt messages
+filterMessages :: Seq.Seq (IsPinned, Aeson.Value) -> [Filter] -> Seq.Seq Aeson.Value
+filterMessages messages filters = fmap snd $ Seq.filter filt messages
   where filt (pinned, json) = pinned || matchFilter (AllFilters filters) json
 
 
@@ -118,18 +122,26 @@ makeMainWindow messagesRef filtersRef = do
         namesAndFilters <- readIORef filtersRef
         -- update filters list
         filterWidgets <- mapM (UI.plainText . fst) namesAndFilters
-        let filterItems = zip (map snd namesAndFilters) filterWidgets
+        let filterItems = zip (fmap snd namesAndFilters) filterWidgets
         UI.clearList filterList
         UI.addMultipleToList filterList filterItems
         -- update messages list
-        let filteredMessages = filterMessages messages (map snd namesAndFilters)
         UI.clearList messageList
-        messageWidgets <- mapM (UI.plainText . jsonToText) filteredMessages
-        let messageItems = zip filteredMessages messageWidgets
-        UI.addMultipleToList messageList messageItems
+        addMessagesToUI namesAndFilters messageList messages
+      addMessages newMessages = do
+        namesAndFilters <- readIORef filtersRef
+        addMessagesToUI namesAndFilters messageList newMessages
 
   refreshMessages
-  return (ui, messageList, filterList, refreshMessages)
+  return (ui, messageList, filterList, refreshMessages, addMessages)
+
+addMessagesToUI :: Filters -> _Widget -> Messages -> IO ()
+addMessagesToUI filters messageList newMessages = do
+  let filteredMessages = toList $ filterMessages newMessages (fmap snd filters)
+  messageWidgets <- mapM (UI.plainText . jsonToText) filteredMessages
+  let messageItems = zip filteredMessages messageWidgets
+  UI.addMultipleToList messageList messageItems
+
 
 makeMessageDetailWindow = do
   mdHeader <- UI.plainText "Message Detail. ESC=return"
@@ -227,29 +239,28 @@ removeSlice n m xs = take n xs ++ drop m xs
 removeIndex :: Int -> [a] -> [a]
 removeIndex n = removeSlice n (n+1)
 
-type MessagesRef = IORef [(IsPinned, Aeson.Value)]
-type FiltersRef = IORef [(FilterName, Filter)]
+
+type Filters = [(FilterName, Filter)]
+type Messages = Seq.Seq (IsPinned, Aeson.Value)
+type MessagesRef = IORef Messages
+type FiltersRef = IORef Filters
 
 
 messageReceived
   :: MessagesRef
   -> FiltersRef
-  -> IO () -- ^ the refreshMessages function
-  -> Either String BS.ByteString -- ^ the new line
+  -> (Messages -> IO ()) -- ^ the addMessages function
+  -> Either String [BS.ByteString] -- ^ the new line
   -> IO ()
-messageReceived messagesRef filtersRef refreshMessages newline =
+messageReceived messagesRef filtersRef addMessages newLines =
   -- potential for race condition here I think!
   -- hmm, or not, since this will be run in the vty-ui event loop.
-  case newline of
-    Right newline -> do
-      filters <- map snd <$> readIORef filtersRef
-      let value = Aeson.decode newline
-      case value of
-       Just json ->
-         when (matchFilter (AllFilters filters) json) (do
-           modifyIORef messagesRef (++ [(False, json)]) -- lol use a vector scrub
-           refreshMessages)
-       Nothing -> return ()
+  case newLines of
+    Right newLines -> do
+      filters <- fmap snd <$> readIORef filtersRef
+      let newMessages = Seq.fromList $ map (False,) $ catMaybes $ map Aeson.decode newLines :: Seq.Seq (IsPinned, Aeson.Value)
+      modifyIORef messagesRef (\messages -> messages Seq.>< newMessages)
+      addMessages newMessages
     Left message -> error message
 
 
@@ -266,15 +277,15 @@ main = do
 
   -- Global Messages and Filters
 
-  messagesRef <- newIORef [] :: IO MessagesRef
+  messagesRef <- newIORef Seq.empty :: IO MessagesRef
   filtersRef <- newIORef [] :: IO FiltersRef
 
   -- UI stuff
 
   -- main window
-  (ui, messageList, filterList, refreshMessages) <- makeMainWindow messagesRef filtersRef
+  (ui, messageList, filterList, refreshMessages, addMessages) <- makeMainWindow messagesRef filtersRef
 
-  forkIO $ streamLines filename 0 1000000 (UI.schedule . messageReceived messagesRef filtersRef refreshMessages)
+  forkIO $ streamLines filename 0 1000000 (UI.schedule . messageReceived messagesRef filtersRef addMessages)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList

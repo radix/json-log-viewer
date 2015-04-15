@@ -308,8 +308,16 @@ main = do
     UI.setText mdBody pretty
     switchToMessageDetail
 
-  filterList `UI.onItemActivated` \(UI.ActivateItemEvent _ filt _) ->
-    error $ show filt
+  let editFilter = return . Just . ("foo",) -- todo: define editFilter to pop up a thing and do a thing.
+
+  filterList `UI.onItemActivated` \(UI.ActivateItemEvent index filt _) -> do
+    maybeNewFilter <- editFilter filt
+    case maybeNewFilter of
+     Just nameAndFilter -> do
+       modifyIORef filtersRef (
+         \filters -> (take index filters) ++ [nameAndFilter] ++ (drop (index+1) filters))
+       refreshMessages
+     Nothing -> return ()
 
   filterList `UI.onKeyPressed` \_ key _ ->
     case key of

@@ -89,8 +89,8 @@ makeEditField labelText = do
   field <- makeField labelText edit
   return (edit, field)
 
-makeMainWindow messagesRef filtersRef = do
-  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, DEL=Delete filter, RET=Inspect, P=Pin message, C=Create Filter"
+makeMainWindow messagesRef filtersRef followingRef = do
+  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, P=Pin message, C=Create Filter, F=Follow end"
   borderedMainHeader <- UI.bordered mainHeader
   messageHeader <- UI.plainText "Messages"
   messageList <- UI.newList 1
@@ -127,20 +127,23 @@ makeMainWindow messagesRef filtersRef = do
         UI.addMultipleToList filterList filterItems
         -- update messages list
         UI.clearList messageList
-        addMessagesToUI namesAndFilters messageList messages
+        currentlyFollowing <- readIORef followingRef
+        addMessagesToUI namesAndFilters messageList messages currentlyFollowing
       addMessages newMessages = do
         namesAndFilters <- readIORef filtersRef
-        addMessagesToUI namesAndFilters messageList newMessages
+        currentlyFollowing <- readIORef followingRef
+        addMessagesToUI namesAndFilters messageList newMessages currentlyFollowing
 
   refreshMessages
   return (ui, messageList, filterList, refreshMessages, addMessages)
 
-addMessagesToUI :: Filters -> _Widget -> Messages -> IO ()
-addMessagesToUI filters messageList newMessages = do
+addMessagesToUI :: Filters -> _Widget -> Messages -> CurrentlyFollowing -> IO ()
+addMessagesToUI filters messageList newMessages currentlyFollowing = do
   let filteredMessages = toList $ filterMessages newMessages (fmap snd filters)
   messageWidgets <- mapM (UI.plainText . jsonToText) filteredMessages
   let messageItems = zip filteredMessages messageWidgets
   UI.addMultipleToList messageList messageItems
+  when currentlyFollowing $ UI.scrollToEnd messageList
 
 
 makeMessageDetailWindow = do
@@ -244,6 +247,7 @@ type Filters = [(FilterName, Filter)]
 type Messages = Seq.Seq (IsPinned, Aeson.Value)
 type MessagesRef = IORef Messages
 type FiltersRef = IORef Filters
+type CurrentlyFollowing = Bool
 
 
 messageReceived
@@ -279,11 +283,12 @@ main = do
 
   messagesRef <- newIORef Seq.empty :: IO MessagesRef
   filtersRef <- newIORef [] :: IO FiltersRef
+  followingRef <- newIORef False :: IO (IORef CurrentlyFollowing)
 
   -- UI stuff
 
   -- main window
-  (ui, messageList, filterList, refreshMessages, addMessages) <- makeMainWindow messagesRef filtersRef
+  (ui, messageList, filterList, refreshMessages, addMessages) <- makeMainWindow messagesRef filtersRef followingRef
 
   forkIO $ streamLines filename 0 1000000 (UI.schedule . messageReceived messagesRef filtersRef addMessages)
 
@@ -308,9 +313,13 @@ main = do
   mainFg `UI.onKeyPressed` \_ key _ ->
     case key of
      Events.KEsc -> exitSuccess
-     (Events.KChar 'f') -> do
+     (Events.KChar 'c') -> do
        UI.focus filterNameEdit
        switchToFilterCreation
+       return True
+     (Events.KChar 'f') -> do
+       modifyIORef followingRef not
+       UI.scrollToEnd messageList
        return True
      _ -> return False
 

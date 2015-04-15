@@ -23,6 +23,7 @@ import           Data.Maybe                (catMaybes, maybe)
 import qualified Data.Sequence             as Seq
 import qualified Data.Text                 as T
 import           Data.Text.Encoding        (decodeUtf8)
+import qualified Graphics.Vty.Attributes   as Attrs
 import qualified Graphics.Vty.Input.Events as Events
 import qualified Graphics.Vty.Widgets.All  as UI
 import           System.Environment        (getArgs)
@@ -336,6 +337,9 @@ main = do
     switchToMessageDetail
 
   let editFilter = return . Just . ("foo",) -- todo: define editFilter to pop up a thing and do a thing.
+
+  filterList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
+  messageList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
 
   filterList `UI.onItemActivated` \(UI.ActivateItemEvent index filt _) -> do
     maybeNewFilter <- editFilter filt

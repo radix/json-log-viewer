@@ -19,13 +19,6 @@ import           System.Posix.Files   (fileSize, getFileStatus)
 type FilePosition = Integer
 type MicroSeconds = Int
 
--- Not sure if this allButLast thing is that great
-
-allButLast :: [a] -> [a]
-allButLast (x:[]) = []
-allButLast (x:xs) = (x:allButLast xs)
-allButLast []     = []
-
 -- TODO: Implement `tail -F` behavior -- streamLines is `tail -f`
 
 -- |Tail a file, sending complete lines to the passed-in IO function.
@@ -55,7 +48,7 @@ streamLines path sizeSoFar delay callback = go sizeSoFar
            newContents <- BS.hGetContents handle
            let lines = BS.splitWith (==10) newContents
            let startNext = newSize - (toInteger $ BS.length $ last lines)
-           mapM_ (callback . Right) $ allButLast lines
+           mapM_ (callback . Right) $ init lines
            go startNext
          else do
            go sizeSoFar

@@ -2,17 +2,16 @@
 
 module TailF where
 
-import           Control.Concurrent   (threadDelay)
-import           Control.Exception    (tryJust)
-import           Control.Monad        (forever, guard)
-import qualified Data.ByteString.Lazy as BS
-import           System.Environment   (getArgs)
-import           System.Exit          (exitFailure, exitSuccess)
-import           System.IO            (IOMode (ReadMode),
-                                       SeekMode (AbsoluteSeek), hPutStrLn,
-                                       hSeek, openFile, stderr)
-import           System.IO.Error      (isDoesNotExistError)
-import           System.Posix.Files   (fileSize, getFileStatus)
+import           Control.Concurrent (threadDelay)
+import           Control.Exception  (tryJust)
+import           Control.Monad      (forever, guard)
+import qualified Data.ByteString    as BS
+import           System.Environment (getArgs)
+import           System.Exit        (exitFailure, exitSuccess)
+import           System.IO          (IOMode (ReadMode), SeekMode (AbsoluteSeek),
+                                     hPutStrLn, hSeek, openFile, stderr)
+import           System.IO.Error    (isDoesNotExistError)
+import           System.Posix.Files (fileSize, getFileStatus)
 
 -- some type aliases for readability
 

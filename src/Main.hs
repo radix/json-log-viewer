@@ -7,34 +7,35 @@
 
 module Main where
 
-import           Control.Concurrent         (forkIO, threadDelay)
-import           Control.Concurrent.MVar    (MVar (..), putMVar, takeMVar)
-import           Control.Exception          (tryJust)
-import           Control.Monad              (forM_, forever, guard, when)
-import qualified Data.Aeson                 as Aeson
-import           Data.Aeson.Encode.Pretty   (encodePretty)
-import qualified Data.ByteString.Lazy       as BS
-import qualified Data.ByteString.Lazy.Char8 as C8
-import           Data.Foldable              (toList)
-import qualified Data.HashMap.Strict        as HM
-import           Data.IORef                 (IORef, modifyIORef, newIORef,
-                                             readIORef, writeIORef)
-import           Data.Maybe                 (catMaybes, maybe)
-import qualified Data.Sequence              as Seq
-import qualified Data.Text                  as T
-import qualified Graphics.Vty.Input.Events  as Events
-import qualified Graphics.Vty.Widgets.All   as UI
-import           System.Environment         (getArgs)
-import           System.Exit                (exitSuccess)
-import           System.IO                  (IOMode (ReadMode),
-                                             SeekMode (AbsoluteSeek), hSeek,
-                                             openFile)
-import           System.IO.Error            (isDoesNotExistError)
-import           System.Posix.Files         (fileSize, getFileStatus)
+import           Control.Concurrent        (forkIO, threadDelay)
+import           Control.Concurrent.MVar   (MVar (..), putMVar, takeMVar)
+import           Control.Exception         (tryJust)
+import           Control.Monad             (forM_, forever, guard, when)
+import qualified Data.Aeson                as Aeson
+import           Data.Aeson.Encode.Pretty  (encodePretty)
+import qualified Data.ByteString           as BS
+import qualified Data.ByteString.Lazy      as BSL
+import           Data.Foldable             (toList)
+import qualified Data.HashMap.Strict       as HM
+import           Data.IORef                (IORef, modifyIORef, newIORef,
+                                            readIORef, writeIORef)
+import           Data.Maybe                (catMaybes, maybe)
+import qualified Data.Sequence             as Seq
+import qualified Data.Text                 as T
+import           Data.Text.Encoding        (decodeUtf8)
+import qualified Graphics.Vty.Input.Events as Events
+import qualified Graphics.Vty.Widgets.All  as UI
+import           System.Environment        (getArgs)
+import           System.Exit               (exitSuccess)
+import           System.IO                 (IOMode (ReadMode),
+                                            SeekMode (AbsoluteSeek), hSeek,
+                                            openFile)
+import           System.IO.Error           (isDoesNotExistError)
+import           System.Posix.Files        (fileSize, getFileStatus)
 
 import           Data.Aeson.Path
 import           Data.Aeson.Path.Parser
-import           TailF                      (streamLines)
+import           TailF                     (streamLines)
 
 -- FILTRATION
 
@@ -232,9 +233,8 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
   return (filterCreationWindow, nameEdit, filterFg, filterDialog)
 
 
--- TODO: Is it okay to use C8.unpack?
 jsonToText :: Aeson.Value -> T.Text
-jsonToText = T.pack . C8.unpack . Aeson.encode
+jsonToText = decodeUtf8 . BSL.toStrict . Aeson.encode
 
 removeSlice :: Int -> Int -> [a] -> [a]
 removeSlice n m xs = take n xs ++ drop m xs
@@ -262,7 +262,7 @@ messageReceived messagesRef filtersRef addMessages newLines =
   case newLines of
     Right newLines -> do
       filters <- fmap snd <$> readIORef filtersRef
-      let newMessages = Seq.fromList $ map (False,) $ catMaybes $ map Aeson.decode newLines :: Seq.Seq (IsPinned, Aeson.Value)
+      let newMessages = Seq.fromList $ map (False,) $ catMaybes $ map (Aeson.decode . BSL.fromStrict) newLines :: Seq.Seq (IsPinned, Aeson.Value)
       modifyIORef messagesRef (\messages -> messages Seq.>< newMessages)
       addMessages newMessages
     Left message -> error message
@@ -313,6 +313,7 @@ main = do
   mainFg `UI.onKeyPressed` \_ key _ ->
     case key of
      Events.KEsc -> exitSuccess
+     (Events.KChar 'q') -> exitSuccess
      (Events.KChar 'c') -> do
        UI.focus filterNameEdit
        switchToFilterCreation
@@ -330,7 +331,7 @@ main = do
      _ -> return False
 
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ message _) -> do
-    let pretty = T.pack $ C8.unpack $ encodePretty message
+    let pretty = decodeUtf8 $ BSL.toStrict $ encodePretty message
     UI.setText mdBody pretty
     switchToMessageDetail
 

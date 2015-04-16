@@ -11,6 +11,7 @@ import           Control.Concurrent        (forkIO, threadDelay)
 import           Control.Concurrent.MVar   (MVar (..), putMVar, takeMVar)
 import           Control.Exception         (tryJust)
 import           Control.Monad             (forM_, forever, guard, when)
+import Data.List (splitAt)
 import qualified Data.Aeson                as Aeson
 import           Data.Aeson.Encode.Pretty  (encodePretty)
 import qualified Data.ByteString           as BS
@@ -35,7 +36,7 @@ import           System.IO.Error           (isDoesNotExistError)
 import           System.Posix.Files        (fileSize, getFileStatus)
 
 import           Data.Aeson.Path
-import           Data.Aeson.Path.Parser
+import qualified Data.Aeson.Path.Parser    as Parser
 import           TailF                     (streamLines)
 
 -- FILTRATION
@@ -124,7 +125,7 @@ makeMainWindow messagesRef filtersRef followingRef = do
         namesAndFilters <- readIORef filtersRef
         -- update filters list
         filterWidgets <- mapM (UI.plainText . fst) namesAndFilters
-        let filterItems = zip (fmap snd namesAndFilters) filterWidgets
+        let filterItems = zip namesAndFilters filterWidgets
         UI.clearList filterList
         UI.addMultipleToList filterList filterItems
         -- update messages list
@@ -155,7 +156,24 @@ makeMessageDetailWindow = do
   messageDetail <- UI.vBox mdHeader mdBody
   return (messageDetail, mdBody)
 
-makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
+-- |A bag of junk useful for filter creation/editing UIs
+data FilterDialog = FilterDialog {
+  nameEdit :: UI.Widget UI.Edit
+  , jsonPathEdit :: UI.Widget UI.Edit
+  , operandEdit :: UI.Widget UI.Edit
+  , operatorRadioGroup :: UI.RadioGroup
+  , equalsCheck :: UI.Widget (UI.CheckBox Bool)
+  , substringCheck :: UI.Widget (UI.CheckBox Bool)
+  , hasKeyCheck :: UI.Widget (UI.CheckBox Bool)
+  , filterDialog :: UI.Dialog
+  , filterFg :: UI.Widget UI.FocusGroup
+  , setDefaults :: IO ()
+  }
+
+
+-- |Create a general filter UI.
+makeFilterDialog :: String -> _ -> IO FilterDialog
+makeFilterDialog dialogName switchToMain = do
   (nameEdit, nameField) <- makeEditField "Filter Name:"
   (jsonPathEdit, jsonPathField) <- makeEditField "JSON Path:"
   parseStatusText <- UI.plainText "Please Enter a JSON Path."
@@ -184,8 +202,7 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
   addRow operatorRadioChecks
   addRow operandField
 
-  (filterDialog, filterFg) <- UI.newDialog dialogBody "Create New Filter"
-  let filterCreationWindow = UI.dialogWidget filterDialog
+  (filterDialog, filterFg) <- UI.newDialog dialogBody "Filter"
 
   let returnKeyMeansNext = [nameEdit, jsonPathEdit, operandEdit]
   forM_ returnKeyMeansNext (`UI.onActivate` (\x -> UI.focusNext filterFg))
@@ -199,7 +216,7 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
   addFocus operandEdit
 
   jsonPathEdit `UI.onChange` \text -> do
-    let path = getPath $ T.unpack text
+    let path = Parser.getPath $ T.unpack text
     case path of
      (Left error) -> UI.setText parseStatusText $ T.pack $ show error
      (Right parse) -> UI.setText parseStatusText "Valid! :-)"
@@ -209,29 +226,124 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
      Events.KEsc -> UI.cancelDialog filterDialog >> return True
      _ -> return False
 
-  filterDialog `UI.onDialogAccept` \_ -> do
-    pathText <- UI.getEditText jsonPathEdit
-    operand <- UI.getEditText operandEdit
-    currentRadio <- UI.getCurrentRadio operatorRadioGroup
-    nameText <- UI.getEditText nameEdit
+  filterDialog `UI.onDialogCancel` const switchToMain
+
+  let setDefaults = do
+        UI.setEditText nameEdit ""
+        UI.setEditText jsonPathEdit ""
+        UI.setEditText operandEdit ""
+        UI.setCheckboxChecked substringCheck
+        UI.focus nameEdit
+
+  return FilterDialog {
+    nameEdit = nameEdit
+    , jsonPathEdit = jsonPathEdit
+    , equalsCheck = equalsCheck
+    , substringCheck = substringCheck
+    , hasKeyCheck = hasKeyCheck
+    , filterDialog = filterDialog
+    , filterFg = filterFg
+    , setDefaults = setDefaults
+    , operandEdit = operandEdit
+    , operatorRadioGroup = operatorRadioGroup}
+
+
+
+-- TODO radix: consider async + wait for getting the result of filter editing?
+
+makeFilterEditWindow
+  :: FiltersRef
+  -> IO () -- ^ refreshMessages function
+  -> IO () -- ^ switchToMain function
+  -> IO (UI.Widget _ -- ^ the main widget
+        , UI.Widget UI.FocusGroup -- ^ the dialog's focus group
+        , (FiltersIndex -> T.Text -> Filter -> IO ())) -- ^ the editFilter function
+makeFilterEditWindow filtersRef refreshMessages switchToMain = do
+  dialogRec <- makeFilterDialog "Edit Filter" switchToMain
+
+  -- YUCK
+  filterIndexRef <- newIORef (Nothing :: Maybe FiltersIndex)
+
+  let editFilter index name filt = do
+        UI.focus (nameEdit dialogRec)
+        case filt of
+         Filter jspath jspred -> do
+           UI.setEditText (nameEdit dialogRec) name
+           UI.setEditText (jsonPathEdit dialogRec) $ Parser.toString jspath
+           case jspred of
+            (Equals jsonVal) -> do
+              UI.setCheckboxChecked (equalsCheck dialogRec)
+              case jsonVal of
+               Aeson.String jsonText -> do -- only supporting texts here for now
+                 UI.setEditText (operandEdit dialogRec) jsonText
+            -- (MatchesRegex text) -> do return () -- TODO!
+            (HasSubstring text) -> do
+              UI.setCheckboxChecked (substringCheck dialogRec)
+              UI.setEditText (operandEdit dialogRec) text
+            (HasKey text) -> do
+              UI.setCheckboxChecked (hasKeyCheck dialogRec)
+              UI.setEditText (operandEdit dialogRec) text
+           writeIORef filterIndexRef $ Just index
+         AllFilters filts -> error "editing multiple filters not supported"
+         AnyFilter filts -> error "editing multiple filters not supported"
+
+  (filterDialog dialogRec) `UI.onDialogAccept` \_ -> do
+    maybeIndex <- readIORef filterIndexRef
+    case maybeIndex of
+     Nothing -> error "Error: trying to save an edited filter without knowing its index"
+     Just index -> do
+       maybeNameAndFilt <- filterFromDialog dialogRec
+       case maybeNameAndFilt of
+        Nothing -> return ()
+        Just pair -> do
+          modifyIORef filtersRef $ replaceAtIndex index pair
+          refreshMessages
+          writeIORef filterIndexRef Nothing
+          switchToMain
+
+  return (UI.dialogWidget (filterDialog dialogRec), filterFg dialogRec, editFilter)
+
+replaceAtIndex :: Int -> a -> [a] -> [a]
+replaceAtIndex index item ls = a ++ (item:b) where (a, (_:b)) = splitAt index ls
+
+filterFromDialog :: FilterDialog -> IO (Maybe (T.Text, Filter))
+filterFromDialog dialogRec = do
+    pathText <- UI.getEditText (jsonPathEdit dialogRec)
+    operand <- UI.getEditText (operandEdit dialogRec)
+    currentRadio <- UI.getCurrentRadio (operatorRadioGroup dialogRec)
+    nameText <- UI.getEditText (nameEdit dialogRec)
     let predicate = case currentRadio of
           Just rButton
-            | rButton == equalsCheck -> Equals $ Aeson.String operand
-            | rButton == substringCheck -> HasSubstring operand
-            | rButton == hasKeyCheck -> HasKey operand
+            | rButton == (equalsCheck dialogRec) -> Equals $ Aeson.String operand
+            | rButton == (substringCheck dialogRec) -> HasSubstring operand
+            | rButton == (hasKeyCheck dialogRec) -> HasKey operand
           _ -> error "shouldn't happen because there's a default"
-    let mpath = getPath $ T.unpack pathText
+    let mpath = Parser.getPath $ T.unpack pathText
     case mpath of
      Right path -> do
        let filt = Filter path predicate
-       modifyIORef filtersRef ((nameText, filt):)
+       return $ Just (nameText, filt)
+     Left e -> return Nothing
+
+makeFilterCreationWindow :: FiltersRef -> IO () -> IO () -> IO (UI.Widget _, UI.Widget UI.FocusGroup, IO ())
+makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
+  dialogRec <- makeFilterDialog "Create Filter" switchToMain
+
+  (filterDialog dialogRec) `UI.onDialogAccept` \_ -> do
+    maybeNameAndFilt <- filterFromDialog dialogRec
+    case maybeNameAndFilt of
+     Just (name, filt) -> do
+       modifyIORef filtersRef ((name, filt):)
        refreshMessages
        switchToMain
-     Left e -> return ()
+     Nothing -> return ()
 
-  filterDialog `UI.onDialogCancel` const switchToMain
+  let createFilter = do
+        (setDefaults dialogRec)
 
-  return (filterCreationWindow, nameEdit, filterFg, filterDialog)
+  return (UI.dialogWidget (filterDialog dialogRec),
+          filterFg dialogRec,
+          createFilter)
 
 
 jsonToText :: Aeson.Value -> T.Text
@@ -249,6 +361,7 @@ type Messages = Seq.Seq (IsPinned, Aeson.Value)
 type MessagesRef = IORef Messages
 type FiltersRef = IORef Filters
 type CurrentlyFollowing = Bool
+type FiltersIndex = Int -- ^ Index into the FiltersRef sequence
 
 
 messageReceived
@@ -305,18 +418,22 @@ main = do
   switchToMessageDetail <- UI.addToCollection c messageDetail messageDetailFg
 
   -- filter creation window
-  (filterCreationWindow,
-   filterNameEdit,
-   filterFg,
-   filterDialog) <- makeFilterCreationWindow filtersRef refreshMessages switchToMain
-  switchToFilterCreation <- UI.addToCollection c filterCreationWindow filterFg
+  (filterCreationWidget,
+   filterCreationFg,
+   createFilter) <- makeFilterCreationWindow filtersRef refreshMessages switchToMain
+  switchToFilterCreation <- UI.addToCollection c filterCreationWidget filterCreationFg
+
+  (filterEditWidget,
+   filterEditFg,
+   editFilter) <- makeFilterEditWindow filtersRef refreshMessages switchToMain
+  switchToFilterEdit <- UI.addToCollection c filterEditWidget filterEditFg
 
   mainFg `UI.onKeyPressed` \_ key _ ->
     case key of
      Events.KEsc -> exitSuccess
      (Events.KChar 'q') -> exitSuccess
      (Events.KChar 'c') -> do
-       UI.focus filterNameEdit
+       createFilter
        switchToFilterCreation
        return True
      (Events.KChar 'f') -> do
@@ -336,19 +453,12 @@ main = do
     UI.setText mdBody pretty
     switchToMessageDetail
 
-  let editFilter = return . Just . ("foo",) -- todo: define editFilter to pop up a thing and do a thing.
-
   filterList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
   messageList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
 
-  filterList `UI.onItemActivated` \(UI.ActivateItemEvent index filt _) -> do
-    maybeNewFilter <- editFilter filt
-    case maybeNewFilter of
-     Just nameAndFilter -> do
-       modifyIORef filtersRef (
-         \filters -> (take index filters) ++ [nameAndFilter] ++ (drop (index+1) filters))
-       refreshMessages
-     Nothing -> return ()
+  filterList `UI.onItemActivated` \(UI.ActivateItemEvent index (name, filt) _) -> do
+    editFilter index name filt
+    switchToFilterEdit
 
   filterList `UI.onKeyPressed` \_ key _ ->
     case key of

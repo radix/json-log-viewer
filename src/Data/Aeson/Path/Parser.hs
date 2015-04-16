@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Data.Aeson.Path.Parser where
 
 import           Data.Aeson.Path
@@ -46,3 +48,10 @@ jsonPathParser = dollar *> pathItems
 
 getPath :: String -> Either P.ParseError JSONPath
 getPath = P.parse jsonPathParser ""
+
+toString :: JSONPath -> T.Text
+toString x = "$" `T.append` go x
+  where go Yield                             = ""
+        go (Select selector path)     = "[" `T.append` (selecta selector) `T.append` "]" `T.append` go path
+        selecta (SelectKey key) = "'" `T.append` key `T.append` "'"
+        selecta (SelectIndex num) = T.pack $ show num

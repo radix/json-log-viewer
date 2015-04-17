@@ -11,7 +11,8 @@ module Main where
 import           Control.Concurrent        (forkIO, threadDelay)
 import           Control.Concurrent.MVar   (MVar (..), putMVar, takeMVar)
 import           Control.Exception         (tryJust)
-import           Control.Monad             (forM_, forever, guard, when)
+import           Control.Monad             (forM_, forever, guard, liftM, mzero,
+                                            when)
 import qualified Data.Aeson                as Aeson
 import           Data.Aeson.Encode.Pretty  (encodePretty)
 import qualified Data.ByteString           as BS
@@ -26,11 +27,14 @@ import           Data.Maybe                (mapMaybe, maybe)
 import qualified Data.Sequence             as Seq
 import qualified Data.Text                 as T
 import           Data.Text.Encoding        (decodeUtf8)
+import qualified Data.Vector               as V
 import qualified Graphics.Vty.Attributes   as Attrs
 import qualified Graphics.Vty.Input.Events as Events
 import qualified Graphics.Vty.Widgets.All  as UI
+import           System.Directory          (getHomeDirectory)
 import           System.Environment        (getArgs)
 import           System.Exit               (exitSuccess)
+import           System.FilePath           ((</>))
 import           System.IO                 (IOMode (ReadMode),
                                             SeekMode (AbsoluteSeek), hSeek,
                                             openFile)
@@ -56,6 +60,42 @@ data Filter
   | AllFilters [Filter]
   | AnyFilter [Filter]
   deriving Show
+
+lArray = Aeson.Array . V.fromList
+
+instance Aeson.ToJSON JSONPredicate where
+  toJSON (Equals jsonVal) = lArray [Aeson.String "Equals", jsonVal]
+  toJSON (MatchesRegex text) = lArray [Aeson.String "MatchesRegex", Aeson.String text]
+  toJSON (HasSubstring text) = lArray [Aeson.String "HasSubstring", Aeson.String text]
+  toJSON (HasKey text) = lArray [Aeson.String "HasKey", Aeson.String text]
+
+instance Aeson.FromJSON JSONPredicate where
+  parseJSON (Aeson.Array v) = case toList v of
+    [Aeson.String "Equals", val] -> pure $ Equals val
+    [Aeson.String "MatchesRegex", Aeson.String text] -> pure $ MatchesRegex text
+    [Aeson.String "HasSubstring", Aeson.String text] -> pure $ HasSubstring text
+    [Aeson.String "HasKey", Aeson.String text] -> pure $ HasKey text
+  parseJSON _ = mzero
+
+instance Aeson.ToJSON Filter where
+  toJSON (Filter jspath predicate) = lArray [
+    Aeson.String "Filter",
+    Aeson.String $ Parser.toString jspath,
+    Aeson.toJSON predicate]
+  toJSON (AllFilters filters) = lArray ["AllFilters", Aeson.toJSON filters]
+  toJSON (AnyFilter filters) = lArray ["AnyFilter", Aeson.toJSON filters]
+
+instance Aeson.FromJSON Filter where
+  parseJSON (Aeson.Array v) = case toList v of
+    [Aeson.String "Filter", Aeson.String path, predicate] ->
+      case Parser.getPath $ T.unpack path of
+       Right path -> Filter path <$> Aeson.parseJSON predicate
+       Left e -> mzero
+    -- [Aeson.String "AllFilters", filters] ->
+    --   AllFilters <$> Aeson.parseJSON filters
+    -- [Aeson.String "AnyFilters", filters] ->
+    --   AnyFilter <$> Aeson.parseJSON filters
+  parseJSON _ = mzero
 
 matchPredicate :: JSONPredicate -> Aeson.Value -> Bool
 matchPredicate (Equals expected)       got = expected == got
@@ -85,6 +125,7 @@ type Filters = [(FilterName, Filter)]
 type Messages = Seq.Seq (IsPinned, Aeson.Value)
 type MessagesRef = IORef Messages
 type FiltersRef = IORef Filters
+type ColumnsRef = IORef [T.Text]
 type CurrentlyFollowing = Bool
 type FiltersIndex = Int -- ^ Index into the FiltersRef sequence
 
@@ -151,7 +192,7 @@ makeEditField labelText = do
   return (edit, field)
 
 makeMainWindow messagesRef filtersRef followingRef columnsRef = do
-  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, P=Pin message, F=Create Filter, C=Change Columns, E=Follow end"
+  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, P=Pin message, F=Create Filter, C=Change Columns, E=Follow end, Ctrl+s=Save settings"
   borderedMainHeader <- UI.bordered mainHeader
 
   messageHeader <- UI.plainText "Messages"
@@ -402,15 +443,47 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
           filterFg dialogRec,
           createFilter)
 
+getSettingsFilePath :: IO FilePath
+getSettingsFilePath =
+  getHomeDirectory `and` (</> ".config" </> "json-log-viewer" </> "settings.json")
+  where and l r = liftM r l
 
-messageReceived
+makeSaveSettingsDialog
+  :: FiltersRef
+  -> ColumnsRef
+  -> IO () -- ^ switchToMain
+  -> IO (UI.Widget _W, UI.Widget UI.FocusGroup)
+makeSaveSettingsDialog filtersRef columnsRef switchToMain = do
+  settingsPath <- getSettingsFilePath
+  dialogBody <- UI.plainText $ T.append "Filters and columns will be saved to " $ T.pack settingsPath
+  (dialog, dialogFg) <- UI.newDialog dialogBody "Save settings?"
+  let dialogWidget = UI.dialogWidget dialog
+
+  dialogFg `UI.onKeyPressed` \_ key _ -> case key of
+    Events.KEsc -> switchToMain >> return True
+    _ -> return False
+
+  dialog `UI.onDialogAccept` \_ -> do
+    filters <- readIORef filtersRef
+    columns <- readIORef columnsRef
+    let jsonBytes = Aeson.encode (filters, columns)
+    BSL.writeFile settingsPath jsonBytes
+    switchToMain
+    return ()
+
+  dialog `UI.onDialogCancel` const switchToMain
+
+  return (dialogWidget, dialogFg)
+
+-- |Handle lines that are coming in from our "tail" process.
+linesReceived
   :: MessagesRef
   -> FiltersRef
   -> (Messages -> IO ()) -- ^ the addMessages function
   -> Int -- ^ index to split each line at :( maybe replace this with a function
   -> Either String [BS.ByteString] -- ^ the new line
   -> IO ()
-messageReceived messagesRef filtersRef addMessages splitIndex newLines =
+linesReceived messagesRef filtersRef addMessages splitIndex newLines =
   -- potential for race condition here I think!
   -- hmm, or not, since this will be run in the vty-ui event loop.
   case newLines of
@@ -430,8 +503,6 @@ usage = "json-log-viewer [--split-at <col>] FILENAME \n\
         \the right of that column in each line of the file.\n\
         \oh and don't use `--split-at=n`, only `--split-at n`, sorry"
 
-
-
 main = do
   args <- getArgs
   case args of
@@ -450,14 +521,14 @@ startApp splitIndex filename = do
   messagesRef <- newIORef Seq.empty :: IO MessagesRef
   filtersRef <- newIORef [] :: IO FiltersRef
   followingRef <- newIORef False :: IO (IORef CurrentlyFollowing)
-  columnsRef <- newIORef [] :: IO (IORef [T.Text])
+  columnsRef <- newIORef [] :: IO ColumnsRef
 
   -- UI stuff
 
   -- main window
   (ui, messageList, filterList, refreshMessages, addMessages, columnsEdit) <- makeMainWindow messagesRef filtersRef followingRef columnsRef
 
-  forkIO $ streamLines filename 0 500000 (UI.schedule . messageReceived messagesRef filtersRef addMessages splitIndex)
+  forkIO $ streamLines filename 0 500000 (UI.schedule . linesReceived messagesRef filtersRef addMessages splitIndex)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList
@@ -483,25 +554,32 @@ startApp splitIndex filename = do
    editFilter) <- makeFilterEditWindow filtersRef refreshMessages switchToMain
   switchToFilterEdit <- UI.addToCollection c filterEditWidget filterEditFg
 
+  (saveSettingsWidget, saveSettingsFg) <- makeSaveSettingsDialog filtersRef columnsRef switchToMain
+  switchToSaveSettingsDialog <- UI.addToCollection c saveSettingsWidget saveSettingsFg
+
   -- vty-ui, bafflingly, calls event handlers going from *outermost* first to
   -- the innermost widget last. So if we bind things on mainFg, they will
-  -- override things like key input in the column text field. (!?)
-  -- So we apply the "mostly-global" key bindings
-  let bindGlobalThings _ key _ = case key of
-        (Events.KChar 'q') -> exitSuccess
-        (Events.KChar 'f') -> do
+  -- override things like key input in the column text field. (!?)  So we apply
+  -- the "mostly-global" key bindings to almost all widgets, but not the
+  -- column-edit widget.
+  let bindGlobalThings _ key mods = case (key, mods) of
+        (Events.KChar 'q', []) -> exitSuccess
+        (Events.KChar 'f', []) -> do
           createFilter
           switchToFilterCreation
           return True
-        (Events.KChar 'e') -> do
+        (Events.KChar 'e', []) -> do
           modifyIORef followingRef not
           UI.scrollToEnd messageList
           return True
-        (Events.KChar 'j') -> do
+        (Events.KChar 'j', []) -> do
           UI.scrollDown messageList
           return True
-        (Events.KChar 'k') -> do
+        (Events.KChar 'k', []) -> do
           UI.scrollUp messageList
+          return True
+        (Events.KChar 's', [Events.MCtrl]) -> do
+          switchToSaveSettingsDialog
           return True
         _ -> return False
 

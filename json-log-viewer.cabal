@@ -46,6 +46,8 @@ executable json-log-viewer
                      , parsec >= 3.1.0
                      , aeson-pretty >= 0.7.0
                      , unix >= 2.7.0
+                     , directory >= 1.2.0.0
+                     , filepath >= 1.4.0.0
   
   -- Directories containing source files.
   hs-source-dirs:      src

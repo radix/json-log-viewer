@@ -15,6 +15,7 @@ import           Control.Monad             (forM_, forever, guard, liftM, mzero,
                                             when)
 import qualified Data.Aeson                as Aeson
 import           Data.Aeson.Encode.Pretty  (encodePretty)
+import qualified Data.Aeson.Types          as Aeson.Types
 import qualified Data.ByteString           as BS
 import qualified Data.ByteString.Lazy      as BSL
 import           Data.Char                 (isSpace)
@@ -23,7 +24,7 @@ import qualified Data.HashMap.Strict       as HM
 import           Data.IORef                (IORef, modifyIORef, newIORef,
                                             readIORef, writeIORef)
 import           Data.List                 (splitAt)
-import           Data.Maybe                (mapMaybe, maybe)
+import           Data.Maybe                (fromMaybe, mapMaybe, maybe)
 import qualified Data.Sequence             as Seq
 import qualified Data.Text                 as T
 import           Data.Text.Encoding        (decodeUtf8)
@@ -239,6 +240,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
         UI.clearList messageList
         currentlyFollowing <- readIORef followingRef
         columns <- readIORef columnsRef
+        UI.setEditText columnsEdit $ T.intercalate ", " columns
         addMessagesToUI namesAndFilters columns messageList messages currentlyFollowing
       addMessages newMessages = do
         namesAndFilters <- readIORef filtersRef
@@ -448,6 +450,23 @@ getSettingsFilePath =
   getHomeDirectory `and` (</> ".config" </> "json-log-viewer" </> "settings.json")
   where and l r = liftM r l
 
+writeSettingsFile :: FilePath -> Filters -> [T.Text] -> IO ()
+writeSettingsFile fp filters columns = do
+  let jsonBytes = encodePretty $ Aeson.object ["filters" Aeson..= filters,
+                                               "columns" Aeson..= columns]
+  BSL.writeFile fp jsonBytes
+
+loadSettingsFile :: FilePath -> IO (Filters, [T.Text])
+loadSettingsFile fp = do
+  bytes <- BSL.readFile fp
+  let columnsAndFilters = do -- maybe monad
+        result <- Aeson.decode bytes
+        flip Aeson.Types.parseMaybe result $ \obj -> do -- parser monad
+          columns <- obj Aeson..: "columns"
+          filters <- obj Aeson..: "filters"
+          return (filters, columns)
+  return $ fromMaybe ([], []) columnsAndFilters
+
 makeSaveSettingsDialog
   :: FiltersRef
   -> ColumnsRef
@@ -466,9 +485,7 @@ makeSaveSettingsDialog filtersRef columnsRef switchToMain = do
   dialog `UI.onDialogAccept` \_ -> do
     filters <- readIORef filtersRef
     columns <- readIORef columnsRef
-    let jsonBytes = encodePretty $ Aeson.object ["filters" Aeson..= filters,
-                                                 "columns" Aeson..= columns]
-    BSL.writeFile settingsPath jsonBytes
+    writeSettingsFile settingsPath filters columns
     switchToMain
     return ()
 
@@ -523,6 +540,12 @@ startApp splitIndex filename = do
   filtersRef <- newIORef [] :: IO FiltersRef
   followingRef <- newIORef False :: IO (IORef CurrentlyFollowing)
   columnsRef <- newIORef [] :: IO ColumnsRef
+
+  -- load settings
+  fp <- getSettingsFilePath
+  (filters, columns) <- loadSettingsFile fp
+  writeIORef filtersRef filters
+  writeIORef columnsRef columns
 
   -- UI stuff
 

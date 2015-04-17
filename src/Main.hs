@@ -7,6 +7,7 @@
 
 module Main where
 
+
 import           Control.Concurrent        (forkIO, threadDelay)
 import           Control.Concurrent.MVar   (MVar (..), putMVar, takeMVar)
 import           Control.Exception         (tryJust)
@@ -35,6 +36,7 @@ import           System.IO                 (IOMode (ReadMode),
                                             openFile)
 import           System.IO.Error           (isDoesNotExistError)
 import           System.Posix.Files        (fileSize, getFileStatus)
+import           Text.Read                 (readMaybe)
 
 import           Data.Aeson.Path
 import qualified Data.Aeson.Path.Parser    as Parser
@@ -407,46 +409,57 @@ messageReceived
   :: MessagesRef
   -> FiltersRef
   -> (Messages -> IO ()) -- ^ the addMessages function
+  -> Int -- ^ index to split each line at :( maybe replace this with a function
   -> Either String [BS.ByteString] -- ^ the new line
   -> IO ()
-messageReceived messagesRef filtersRef addMessages newLines =
+messageReceived messagesRef filtersRef addMessages splitIndex newLines =
   -- potential for race condition here I think!
   -- hmm, or not, since this will be run in the vty-ui event loop.
   case newLines of
     Right newLines -> do
       filters <- fmap snd <$> readIORef filtersRef
-      let newMessages = Seq.fromList $ map (False,) $ mapMaybe (Aeson.decode . BSL.fromStrict) newLines :: Seq.Seq (IsPinned, Aeson.Value)
+      let splitLines = map (snd . BS.splitAt splitIndex) newLines
+          decoder = Aeson.decode :: BSL.ByteString -> Maybe Aeson.Value
+          newJsons = mapMaybe (decoder . BSL.fromStrict) splitLines
+          newMessages = Seq.fromList $ map (False,) newJsons
       modifyIORef messagesRef (Seq.>< newMessages)
       addMessages newMessages
     Left message -> error message
 
 
-usage = "json-log-viewer [filename]"
+usage = "json-log-viewer [--split-at <col>] FILENAME \n\
+        \--split-at takes an column number and only considers the data to\n\
+        \the right of that column in each line of the file.\n\
+        \oh and don't use `--split-at=n`, only `--split-at n`, sorry"
+
+
 
 main = do
   args <- getArgs
-  let filename = case args of
+  case args of
         [] -> error usage
         ["-h"] -> error usage
         ["--help"] -> error usage
-        [filename] -> filename
+        ["--split-at", n, filename] ->
+          case (readMaybe n :: Maybe Int) of
+          Just n -> startApp n filename
+          Nothing -> error usage
+        [filename] -> startApp 0 filename
         _ -> error usage
 
-  -- Global Messages and Filters
-
+startApp splitIndex filename = do
+  -- mutable variablessss
   messagesRef <- newIORef Seq.empty :: IO MessagesRef
   filtersRef <- newIORef [] :: IO FiltersRef
   followingRef <- newIORef False :: IO (IORef CurrentlyFollowing)
-
   columnsRef <- newIORef [] :: IO (IORef [T.Text])
-  writeIORef columnsRef [] -- sample data
 
   -- UI stuff
 
   -- main window
   (ui, messageList, filterList, refreshMessages, addMessages, columnsEdit) <- makeMainWindow messagesRef filtersRef followingRef columnsRef
 
-  forkIO $ streamLines filename 0 1000000 (UI.schedule . messageReceived messagesRef filtersRef addMessages)
+  forkIO $ streamLines filename 0 500000 (UI.schedule . messageReceived messagesRef filtersRef addMessages splitIndex)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList

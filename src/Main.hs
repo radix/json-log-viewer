@@ -466,7 +466,8 @@ makeSaveSettingsDialog filtersRef columnsRef switchToMain = do
   dialog `UI.onDialogAccept` \_ -> do
     filters <- readIORef filtersRef
     columns <- readIORef columnsRef
-    let jsonBytes = Aeson.encode (filters, columns)
+    let jsonBytes = encodePretty $ Aeson.object ["filters" Aeson..= filters,
+                                                 "columns" Aeson..= columns]
     BSL.writeFile settingsPath jsonBytes
     switchToMain
     return ()

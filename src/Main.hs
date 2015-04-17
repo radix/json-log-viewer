@@ -72,7 +72,6 @@ matchFilter (AllFilters filters) aesonValue = all (`matchFilter` aesonValue) fil
 matchFilter (AnyFilter filters) aesonValue = any (`matchFilter` aesonValue) filters
 matchFilter _ _ = False
 
-
 filterMessages :: Seq.Seq (IsPinned, Aeson.Value) -> [Filter] -> Seq.Seq Aeson.Value
 filterMessages messages filters = snd <$> Seq.filter filt messages
   where filt (pinned, json) = pinned || matchFilter (AllFilters filters) json
@@ -82,19 +81,26 @@ filterMessages messages filters = snd <$> Seq.filter filt messages
 type IsPinned = Bool
 type IsActive = Bool
 type FilterName = T.Text
+type Filters = [(FilterName, Filter)]
+type Messages = Seq.Seq (IsPinned, Aeson.Value)
+type MessagesRef = IORef Messages
+type FiltersRef = IORef Filters
+type CurrentlyFollowing = Bool
+type FiltersIndex = Int -- ^ Index into the FiltersRef sequence
 
+replaceAtIndex :: Int -> a -> [a] -> [a]
+replaceAtIndex index item ls = a ++ (item:b) where (a, _:b) = splitAt index ls
 
--- UI code. It's groooooss.
+jsonToText :: Aeson.Value -> T.Text
+jsonToText = decodeUtf8 . BSL.toStrict . Aeson.encode
 
-makeField labelText widget = do
-  label <- UI.plainText labelText
-  UI.hBox label widget
+removeSlice :: Int -> Int -> [a] -> [a]
+removeSlice n m xs = take n xs ++ drop m xs
 
-makeEditField labelText = do
-  edit <- UI.editWidget
-  field <- makeField labelText edit
-  return (edit, field)
+removeIndex :: Int -> [a] -> [a]
+removeIndex n = removeSlice n (n+1)
 
+-- |Given a list of columns and a json value, format it.
 columnify :: [T.Text] -> Aeson.Value -> T.Text
 columnify columns message =
   case message of
@@ -112,10 +118,37 @@ columnify columns message =
            _ -> ""
         renderWithKey key str = key `T.append` "=" `T.append` str `T.append` " "
 
+-- |Given a list of columns and a json value, format it. If columns is null,
+-- the plain json is returned.
 formatMessage :: [T.Text] -> Aeson.Value -> T.Text
 formatMessage columns message= if null columns
                                 then jsonToText message
                                 else columnify columns message
+
+-- UI code. It's groooooss.
+
+-- |A bag of junk useful for filter creation/editing UIs
+data FilterDialog = FilterDialog {
+  nameEdit             :: UI.Widget UI.Edit
+  , jsonPathEdit       :: UI.Widget UI.Edit
+  , operandEdit        :: UI.Widget UI.Edit
+  , operatorRadioGroup :: UI.RadioGroup
+  , equalsCheck        :: UI.Widget (UI.CheckBox Bool)
+  , substringCheck     :: UI.Widget (UI.CheckBox Bool)
+  , hasKeyCheck        :: UI.Widget (UI.CheckBox Bool)
+  , filterDialog       :: UI.Dialog
+  , filterFg           :: UI.Widget UI.FocusGroup
+  , setDefaults        :: IO ()
+  }
+
+makeField labelText widget = do
+  label <- UI.plainText labelText
+  UI.hBox label widget
+
+makeEditField labelText = do
+  edit <- UI.editWidget
+  field <- makeField labelText edit
+  return (edit, field)
 
 makeMainWindow messagesRef filtersRef followingRef columnsRef = do
   mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, P=Pin message, F=Create Filter, C=Change Columns, E=Follow end"
@@ -190,28 +223,12 @@ addMessagesToUI filters columns messageList newMessages currentlyFollowing = do
   UI.addMultipleToList messageList messageItems
   when currentlyFollowing $ UI.scrollToEnd messageList
 
-
 makeMessageDetailWindow = do
   mdHeader <- UI.plainText "Message Detail. ESC=return"
   mdHeader <- UI.bordered mdHeader
   mdBody <- UI.plainText "Insert message here."
   messageDetail <- UI.vBox mdHeader mdBody
   return (messageDetail, mdBody)
-
--- |A bag of junk useful for filter creation/editing UIs
-data FilterDialog = FilterDialog {
-  nameEdit             :: UI.Widget UI.Edit
-  , jsonPathEdit       :: UI.Widget UI.Edit
-  , operandEdit        :: UI.Widget UI.Edit
-  , operatorRadioGroup :: UI.RadioGroup
-  , equalsCheck        :: UI.Widget (UI.CheckBox Bool)
-  , substringCheck     :: UI.Widget (UI.CheckBox Bool)
-  , hasKeyCheck        :: UI.Widget (UI.CheckBox Bool)
-  , filterDialog       :: UI.Dialog
-  , filterFg           :: UI.Widget UI.FocusGroup
-  , setDefaults        :: IO ()
-  }
-
 
 -- |Create a general filter UI.
 makeFilterDialog :: String -> IO () -> IO FilterDialog
@@ -345,9 +362,8 @@ makeFilterEditWindow filtersRef refreshMessages switchToMain = do
 
   return (UI.dialogWidget (filterDialog dialogRec), filterFg dialogRec, editFilter)
 
-replaceAtIndex :: Int -> a -> [a] -> [a]
-replaceAtIndex index item ls = a ++ (item:b) where (a, _:b) = splitAt index ls
 
+-- | Create a Filter based on the contents of a filter-editing dialog.
 filterFromDialog :: FilterDialog -> IO (Maybe (T.Text, Filter))
 filterFromDialog dialogRec = do
     pathText <- UI.getEditText (jsonPathEdit dialogRec)
@@ -385,24 +401,6 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
   return (UI.dialogWidget (filterDialog dialogRec),
           filterFg dialogRec,
           createFilter)
-
-
-jsonToText :: Aeson.Value -> T.Text
-jsonToText = decodeUtf8 . BSL.toStrict . Aeson.encode
-
-removeSlice :: Int -> Int -> [a] -> [a]
-removeSlice n m xs = take n xs ++ drop m xs
-
-removeIndex :: Int -> [a] -> [a]
-removeIndex n = removeSlice n (n+1)
-
-
-type Filters = [(FilterName, Filter)]
-type Messages = Seq.Seq (IsPinned, Aeson.Value)
-type MessagesRef = IORef Messages
-type FiltersRef = IORef Filters
-type CurrentlyFollowing = Bool
-type FiltersIndex = Int -- ^ Index into the FiltersRef sequence
 
 
 messageReceived

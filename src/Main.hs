@@ -32,10 +32,11 @@ import qualified Data.Vector               as V
 import qualified Graphics.Vty.Attributes   as Attrs
 import qualified Graphics.Vty.Input.Events as Events
 import qualified Graphics.Vty.Widgets.All  as UI
-import           System.Directory          (getHomeDirectory)
+import           System.Directory          (createDirectoryIfMissing,
+                                            getHomeDirectory)
 import           System.Environment        (getArgs)
 import           System.Exit               (exitSuccess)
-import           System.FilePath           ((</>))
+import           System.FilePath           (splitFileName, (</>))
 import           System.IO                 (IOMode (ReadMode),
                                             SeekMode (AbsoluteSeek), hSeek,
                                             openFile)
@@ -447,25 +448,35 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
 
 getSettingsFilePath :: IO FilePath
 getSettingsFilePath =
-  getHomeDirectory `and` (</> ".config" </> "json-log-viewer" </> "settings.json")
+  getHomeDirectory `and` (</> ".config"
+                          </> "json-log-viewer"
+                          </> "settings.json")
   where and l r = liftM r l
 
 writeSettingsFile :: FilePath -> Filters -> [T.Text] -> IO ()
 writeSettingsFile fp filters columns = do
   let jsonBytes = encodePretty $ Aeson.object ["filters" Aeson..= filters,
                                                "columns" Aeson..= columns]
+  createDirectoryIfMissing True $ fst $ splitFileName fp
   BSL.writeFile fp jsonBytes
 
-loadSettingsFile :: FilePath -> IO (Filters, [T.Text])
-loadSettingsFile fp = do
-  bytes <- BSL.readFile fp
+parseSettings :: BSL.ByteString -> (Filters, [T.Text])
+parseSettings bytes =
   let columnsAndFilters = do -- maybe monad
         result <- Aeson.decode bytes
         flip Aeson.Types.parseMaybe result $ \obj -> do -- parser monad
           columns <- obj Aeson..: "columns"
           filters <- obj Aeson..: "filters"
           return (filters, columns)
-  return $ fromMaybe ([], []) columnsAndFilters
+  in
+   fromMaybe ([], []) columnsAndFilters
+
+loadSettingsFile :: FilePath -> IO (Filters, [T.Text])
+loadSettingsFile fp = do
+  e <- tryJust (guard . isDoesNotExistError) (BSL.readFile fp)
+  case e of
+   Left e -> return ([], [])
+   Right bytes -> return $ parseSettings bytes
 
 makeSaveSettingsDialog
   :: FiltersRef

@@ -25,7 +25,7 @@ examples:
 -- - '<*>' I haven't internalized this one yet, in the context of parsec :(
 -- - '<|>' either parse the left or the right.
 -- - '<$>' apply the pure function on the left to the result of parsing the
---   right.
+--   right. <$> == fmap!
 jsonPathParser :: P.Parsec String st JSONPath
 jsonPathParser = dollar *> pathItems
   where
@@ -52,6 +52,6 @@ getPath = P.parse jsonPathParser ""
 toString :: JSONPath -> T.Text
 toString x = "$" `T.append` go x
   where go Yield                             = ""
-        go (Select selector path)     = "[" `T.append` (selecta selector) `T.append` "]" `T.append` go path
+        go (Select selector path)     = "[" `T.append` selecta selector `T.append` "]" `T.append` go path
         selecta (SelectKey key) = "'" `T.append` key `T.append` "'"
         selecta (SelectIndex num) = T.pack $ show num

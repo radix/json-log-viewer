@@ -46,7 +46,7 @@ streamLines path sizeSoFar delay callback = go sizeSoFar
            hSeek handle AbsoluteSeek sizeSoFar
            newContents <- BS.hGetContents handle
            let lines = BS.splitWith (==10) newContents
-           let startNext = newSize - (toInteger $ BS.length $ last lines)
+           let startNext = newSize - toInteger (BS.length $ last lines)
            callback $ Right $ init lines
            go startNext
          else

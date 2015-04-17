@@ -11,16 +11,17 @@ import           Control.Concurrent        (forkIO, threadDelay)
 import           Control.Concurrent.MVar   (MVar (..), putMVar, takeMVar)
 import           Control.Exception         (tryJust)
 import           Control.Monad             (forM_, forever, guard, when)
-import Data.List (splitAt)
 import qualified Data.Aeson                as Aeson
 import           Data.Aeson.Encode.Pretty  (encodePretty)
 import qualified Data.ByteString           as BS
 import qualified Data.ByteString.Lazy      as BSL
+import           Data.Char                 (isSpace)
 import           Data.Foldable             (toList)
 import qualified Data.HashMap.Strict       as HM
 import           Data.IORef                (IORef, modifyIORef, newIORef,
                                             readIORef, writeIORef)
-import           Data.Maybe                (catMaybes, maybe)
+import           Data.List                 (splitAt)
+import           Data.Maybe                (mapMaybe, maybe)
 import qualified Data.Sequence             as Seq
 import qualified Data.Text                 as T
 import           Data.Text.Encoding        (decodeUtf8)
@@ -71,7 +72,7 @@ matchFilter _ _ = False
 
 
 filterMessages :: Seq.Seq (IsPinned, Aeson.Value) -> [Filter] -> Seq.Seq Aeson.Value
-filterMessages messages filters = fmap snd $ Seq.filter filt messages
+filterMessages messages filters = snd <$> Seq.filter filt messages
   where filt (pinned, json) = pinned || matchFilter (AllFilters filters) json
 
 
@@ -92,18 +93,48 @@ makeEditField labelText = do
   field <- makeField labelText edit
   return (edit, field)
 
-makeMainWindow messagesRef filtersRef followingRef = do
-  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, P=Pin message, C=Create Filter, F=Follow end"
+columnify :: [T.Text] -> Aeson.Value -> T.Text
+columnify columns message =
+  case message of
+       (Aeson.Object hashmap) -> T.concat $ fmap (getColumn hashmap) columns
+       _ -> "not an object"
+  where getColumn hashmap column =
+          case HM.lookup column hashmap of
+           (Just (Aeson.String str)) ->
+             if "\n" `T.isInfixOf` str -- the list widgets won't show anything
+                                     -- after a newline, so don't include them
+             then renderWithKey column (T.pack $ show str)
+             else renderWithKey column str
+           (Just (Aeson.Number num)) -> renderWithKey column $ T.pack $ show num
+           (Just x) -> renderWithKey column (T.pack $ show x)
+           _ -> ""
+        renderWithKey key str = key `T.append` "=" `T.append` str `T.append` " "
+
+formatMessage :: [T.Text] -> Aeson.Value -> T.Text
+formatMessage columns message= if null columns
+                                then jsonToText message
+                                else columnify columns message
+
+makeMainWindow messagesRef filtersRef followingRef columnsRef = do
+  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, P=Pin message, F=Create Filter, C=Change Columns, E=Follow end"
   borderedMainHeader <- UI.bordered mainHeader
+
   messageHeader <- UI.plainText "Messages"
   messageList <- UI.newList 1
+  borderedMessages <- UI.bordered messageList
+
   filterHeader <- UI.plainText "Filters"
   filterList <- UI.newList 1
   borderedFilters <- UI.bordered filterList
-  borderedMessages <- UI.bordered messageList
+
+  columnsLabel <- UI.plainText "Columns:"
+  columnsEdit <- UI.editWidget
+  columnEditor <- UI.hBox columnsLabel columnsEdit
+
   messagesAndHeader <- UI.vBox messageHeader borderedMessages
-  filtersAndHeader <- UI.vBox filterHeader borderedFilters
-  hb <- UI.hBox filtersAndHeader messagesAndHeader
+  rightArea <- UI.vBox columnEditor messagesAndHeader
+  leftArea <- UI.vBox filterHeader borderedFilters
+  hb <- UI.hBox leftArea rightArea
   UI.setBoxChildSizePolicy hb $ UI.Percentage 15
   headerAndBody <- UI.vBox borderedMainHeader hb
   ui <- UI.centered headerAndBody
@@ -131,19 +162,28 @@ makeMainWindow messagesRef filtersRef followingRef = do
         -- update messages list
         UI.clearList messageList
         currentlyFollowing <- readIORef followingRef
-        addMessagesToUI namesAndFilters messageList messages currentlyFollowing
+        columns <- readIORef columnsRef
+        addMessagesToUI namesAndFilters columns messageList messages currentlyFollowing
       addMessages newMessages = do
         namesAndFilters <- readIORef filtersRef
         currentlyFollowing <- readIORef followingRef
-        addMessagesToUI namesAndFilters messageList newMessages currentlyFollowing
+        columns <- readIORef columnsRef
+        addMessagesToUI namesAndFilters columns messageList newMessages currentlyFollowing
+
+  columnsEdit `UI.onActivate` \widg -> do
+    columnsText <- UI.getEditText widg
+    let columns = filter (not . T.null) $ T.split (\char -> char == ',' || isSpace char) columnsText
+    writeIORef columnsRef columns
+    refreshMessages
+    UI.focus messageList
 
   refreshMessages
-  return (ui, messageList, filterList, refreshMessages, addMessages)
+  return (ui, messageList, filterList, refreshMessages, addMessages, columnsEdit)
 
-addMessagesToUI :: Filters -> _Widget -> Messages -> CurrentlyFollowing -> IO ()
-addMessagesToUI filters messageList newMessages currentlyFollowing = do
+addMessagesToUI :: Filters -> [T.Text] -> _Widget -> Messages -> CurrentlyFollowing -> IO ()
+addMessagesToUI filters columns messageList newMessages currentlyFollowing = do
   let filteredMessages = toList $ filterMessages newMessages (fmap snd filters)
-  messageWidgets <- mapM (UI.plainText . jsonToText) filteredMessages
+  messageWidgets <- mapM (UI.plainText . formatMessage columns) filteredMessages
   let messageItems = zip filteredMessages messageWidgets
   UI.addMultipleToList messageList messageItems
   when currentlyFollowing $ UI.scrollToEnd messageList
@@ -158,21 +198,21 @@ makeMessageDetailWindow = do
 
 -- |A bag of junk useful for filter creation/editing UIs
 data FilterDialog = FilterDialog {
-  nameEdit :: UI.Widget UI.Edit
-  , jsonPathEdit :: UI.Widget UI.Edit
-  , operandEdit :: UI.Widget UI.Edit
+  nameEdit             :: UI.Widget UI.Edit
+  , jsonPathEdit       :: UI.Widget UI.Edit
+  , operandEdit        :: UI.Widget UI.Edit
   , operatorRadioGroup :: UI.RadioGroup
-  , equalsCheck :: UI.Widget (UI.CheckBox Bool)
-  , substringCheck :: UI.Widget (UI.CheckBox Bool)
-  , hasKeyCheck :: UI.Widget (UI.CheckBox Bool)
-  , filterDialog :: UI.Dialog
-  , filterFg :: UI.Widget UI.FocusGroup
-  , setDefaults :: IO ()
+  , equalsCheck        :: UI.Widget (UI.CheckBox Bool)
+  , substringCheck     :: UI.Widget (UI.CheckBox Bool)
+  , hasKeyCheck        :: UI.Widget (UI.CheckBox Bool)
+  , filterDialog       :: UI.Dialog
+  , filterFg           :: UI.Widget UI.FocusGroup
+  , setDefaults        :: IO ()
   }
 
 
 -- |Create a general filter UI.
-makeFilterDialog :: String -> _ -> IO FilterDialog
+makeFilterDialog :: String -> IO () -> IO FilterDialog
 makeFilterDialog dialogName switchToMain = do
   (nameEdit, nameField) <- makeEditField "Filter Name:"
   (jsonPathEdit, jsonPathField) <- makeEditField "JSON Path:"
@@ -255,9 +295,9 @@ makeFilterEditWindow
   :: FiltersRef
   -> IO () -- ^ refreshMessages function
   -> IO () -- ^ switchToMain function
-  -> IO (UI.Widget _ -- ^ the main widget
+  -> IO (UI.Widget _W -- ^ the main widget
         , UI.Widget UI.FocusGroup -- ^ the dialog's focus group
-        , (FiltersIndex -> T.Text -> Filter -> IO ())) -- ^ the editFilter function
+        , FiltersIndex -> T.Text -> Filter -> IO ()) -- ^ the editFilter function
 makeFilterEditWindow filtersRef refreshMessages switchToMain = do
   dialogRec <- makeFilterDialog "Edit Filter" switchToMain
 
@@ -274,7 +314,7 @@ makeFilterEditWindow filtersRef refreshMessages switchToMain = do
             (Equals jsonVal) -> do
               UI.setCheckboxChecked (equalsCheck dialogRec)
               case jsonVal of
-               Aeson.String jsonText -> do -- only supporting texts here for now
+               Aeson.String jsonText -> -- only supporting texts here for now
                  UI.setEditText (operandEdit dialogRec) jsonText
             -- (MatchesRegex text) -> do return () -- TODO!
             (HasSubstring text) -> do
@@ -287,7 +327,7 @@ makeFilterEditWindow filtersRef refreshMessages switchToMain = do
          AllFilters filts -> error "editing multiple filters not supported"
          AnyFilter filts -> error "editing multiple filters not supported"
 
-  (filterDialog dialogRec) `UI.onDialogAccept` \_ -> do
+  filterDialog dialogRec `UI.onDialogAccept` \_ -> do
     maybeIndex <- readIORef filterIndexRef
     case maybeIndex of
      Nothing -> error "Error: trying to save an edited filter without knowing its index"
@@ -304,7 +344,7 @@ makeFilterEditWindow filtersRef refreshMessages switchToMain = do
   return (UI.dialogWidget (filterDialog dialogRec), filterFg dialogRec, editFilter)
 
 replaceAtIndex :: Int -> a -> [a] -> [a]
-replaceAtIndex index item ls = a ++ (item:b) where (a, (_:b)) = splitAt index ls
+replaceAtIndex index item ls = a ++ (item:b) where (a, _:b) = splitAt index ls
 
 filterFromDialog :: FilterDialog -> IO (Maybe (T.Text, Filter))
 filterFromDialog dialogRec = do
@@ -314,9 +354,9 @@ filterFromDialog dialogRec = do
     nameText <- UI.getEditText (nameEdit dialogRec)
     let predicate = case currentRadio of
           Just rButton
-            | rButton == (equalsCheck dialogRec) -> Equals $ Aeson.String operand
-            | rButton == (substringCheck dialogRec) -> HasSubstring operand
-            | rButton == (hasKeyCheck dialogRec) -> HasKey operand
+            | rButton == equalsCheck dialogRec -> Equals $ Aeson.String operand
+            | rButton == substringCheck dialogRec -> HasSubstring operand
+            | rButton == hasKeyCheck dialogRec -> HasKey operand
           _ -> error "shouldn't happen because there's a default"
     let mpath = Parser.getPath $ T.unpack pathText
     case mpath of
@@ -325,11 +365,11 @@ filterFromDialog dialogRec = do
        return $ Just (nameText, filt)
      Left e -> return Nothing
 
-makeFilterCreationWindow :: FiltersRef -> IO () -> IO () -> IO (UI.Widget _, UI.Widget UI.FocusGroup, IO ())
+makeFilterCreationWindow :: FiltersRef -> IO () -> IO () -> IO (UI.Widget _W, UI.Widget UI.FocusGroup, IO ())
 makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
   dialogRec <- makeFilterDialog "Create Filter" switchToMain
 
-  (filterDialog dialogRec) `UI.onDialogAccept` \_ -> do
+  filterDialog dialogRec `UI.onDialogAccept` \_ -> do
     maybeNameAndFilt <- filterFromDialog dialogRec
     case maybeNameAndFilt of
      Just (name, filt) -> do
@@ -338,8 +378,7 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
        switchToMain
      Nothing -> return ()
 
-  let createFilter = do
-        (setDefaults dialogRec)
+  let createFilter = setDefaults dialogRec
 
   return (UI.dialogWidget (filterDialog dialogRec),
           filterFg dialogRec,
@@ -376,8 +415,8 @@ messageReceived messagesRef filtersRef addMessages newLines =
   case newLines of
     Right newLines -> do
       filters <- fmap snd <$> readIORef filtersRef
-      let newMessages = Seq.fromList $ map (False,) $ catMaybes $ map (Aeson.decode . BSL.fromStrict) newLines :: Seq.Seq (IsPinned, Aeson.Value)
-      modifyIORef messagesRef (\messages -> messages Seq.>< newMessages)
+      let newMessages = Seq.fromList $ map (False,) $ mapMaybe (Aeson.decode . BSL.fromStrict) newLines :: Seq.Seq (IsPinned, Aeson.Value)
+      modifyIORef messagesRef (Seq.>< newMessages)
       addMessages newMessages
     Left message -> error message
 
@@ -399,16 +438,20 @@ main = do
   filtersRef <- newIORef [] :: IO FiltersRef
   followingRef <- newIORef False :: IO (IORef CurrentlyFollowing)
 
+  columnsRef <- newIORef [] :: IO (IORef [T.Text])
+  writeIORef columnsRef [] -- sample data
+
   -- UI stuff
 
   -- main window
-  (ui, messageList, filterList, refreshMessages, addMessages) <- makeMainWindow messagesRef filtersRef followingRef
+  (ui, messageList, filterList, refreshMessages, addMessages, columnsEdit) <- makeMainWindow messagesRef filtersRef followingRef columnsRef
 
   forkIO $ streamLines filename 0 1000000 (UI.schedule . messageReceived messagesRef filtersRef addMessages)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList
   UI.addToFocusGroup mainFg filterList
+  UI.addToFocusGroup mainFg columnsEdit
   c <- UI.newCollection
   switchToMain <- UI.addToCollection c ui mainFg
 
@@ -423,30 +466,41 @@ main = do
    createFilter) <- makeFilterCreationWindow filtersRef refreshMessages switchToMain
   switchToFilterCreation <- UI.addToCollection c filterCreationWidget filterCreationFg
 
+  -- filter edit window
   (filterEditWidget,
    filterEditFg,
    editFilter) <- makeFilterEditWindow filtersRef refreshMessages switchToMain
   switchToFilterEdit <- UI.addToCollection c filterEditWidget filterEditFg
 
+  -- vty-ui, bafflingly, calls event handlers going from *outermost* first to
+  -- the innermost widget last. So if we bind things on mainFg, they will
+  -- override things like key input in the column text field. (!?)
+  -- So we apply the "mostly-global" key bindings
+  let bindGlobalThings _ key _ = case key of
+        (Events.KChar 'q') -> exitSuccess
+        (Events.KChar 'f') -> do
+          createFilter
+          switchToFilterCreation
+          return True
+        (Events.KChar 'e') -> do
+          modifyIORef followingRef not
+          UI.scrollToEnd messageList
+          return True
+        (Events.KChar 'j') -> do
+          UI.scrollDown messageList
+          return True
+        (Events.KChar 'k') -> do
+          UI.scrollUp messageList
+          return True
+        _ -> return False
+
   mainFg `UI.onKeyPressed` \_ key _ ->
     case key of
      Events.KEsc -> exitSuccess
-     (Events.KChar 'q') -> exitSuccess
-     (Events.KChar 'c') -> do
-       createFilter
-       switchToFilterCreation
-       return True
-     (Events.KChar 'f') -> do
-       modifyIORef followingRef not
-       UI.scrollToEnd messageList
-       return True
-     (Events.KChar 'j') -> do
-       UI.scrollDown messageList
-       return True
-     (Events.KChar 'k') -> do
-       UI.scrollUp messageList
-       return True
      _ -> return False
+
+  messageList `UI.onKeyPressed` bindGlobalThings
+  filterList `UI.onKeyPressed` bindGlobalThings
 
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ message _) -> do
     let pretty = decodeUtf8 $ BSL.toStrict $ encodePretty message

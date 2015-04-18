@@ -19,11 +19,11 @@ data JSONPath
   | Select JSONSelector JSONPath
   deriving Show
 
-jsonPath :: JSONPath -> Aeson.Value -> Maybe Aeson.Value
-jsonPath Yield value = Just value
-jsonPath (Select (SelectKey key) remainingPath) (Aeson.Object obj)
-  | Just value <- HM.lookup key obj = jsonPath remainingPath value
-jsonPath (Select (SelectIndex index) remainingPath) (Aeson.Array array)
-  | Just value <- array V.!? index = jsonPath remainingPath value
-jsonPath _ _ = Nothing
+followPath :: JSONPath -> Aeson.Value -> Maybe Aeson.Value
+followPath Yield value = Just value
+followPath (Select (SelectKey key) remainingPath) (Aeson.Object obj)
+  | Just value <- HM.lookup key obj = followPath remainingPath value
+followPath (Select (SelectIndex index) remainingPath) (Aeson.Array array)
+  | Just value <- array V.!? index = followPath remainingPath value
+followPath _ _ = Nothing
 

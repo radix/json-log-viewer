@@ -1,8 +1,10 @@
+{-# LANGUAGE NamedFieldPuns            #-}
 {-# LANGUAGE NamedWildCards            #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE PartialTypeSignatures     #-}
 {-# LANGUAGE PatternGuards             #-}
+{-# LANGUAGE RecordWildCards           #-}
 {-# LANGUAGE TupleSections             #-}
 
 module Main where
@@ -44,7 +46,8 @@ import           System.IO.Error           (isDoesNotExistError)
 import           System.Posix.Files        (fileSize, getFileStatus)
 import           Text.Read                 (readMaybe)
 
-import           Data.Aeson.Path
+import           Data.Aeson.Path           (JSONPath (..), JSONSelector,
+                                            followPath)
 import qualified Data.Aeson.Path.Parser    as Parser
 import           TailF                     (streamLines)
 
@@ -57,11 +60,11 @@ data JSONPredicate
   | HasKey T.Text
   deriving Show
 
-data Filter
-  = Filter JSONPath JSONPredicate
-  | AllFilters [Filter]
-  | AnyFilter [Filter]
-  deriving Show
+data LogFilter = LogFilter
+  { jsonPath       :: JSONPath
+  , jsonPredicate  :: JSONPredicate
+  , filterName     :: T.Text
+  , filterIsActive :: IsActive} deriving Show
 
 lArray = Aeson.Array . V.fromList
 
@@ -79,24 +82,26 @@ instance Aeson.FromJSON JSONPredicate where
     [Aeson.String "HasKey", Aeson.String text] -> pure $ HasKey text
   parseJSON _ = mzero
 
-instance Aeson.ToJSON Filter where
-  toJSON (Filter jspath predicate) = lArray [
-    Aeson.String "Filter",
-    Aeson.String $ Parser.toString jspath,
-    Aeson.toJSON predicate]
-  toJSON (AllFilters filters) = lArray ["AllFilters", Aeson.toJSON filters]
-  toJSON (AnyFilter filters) = lArray ["AnyFilter", Aeson.toJSON filters]
+instance Aeson.ToJSON LogFilter where
+  toJSON (LogFilter {..}) = Aeson.object [
+    "name" Aeson..= filterName
+    , "is_active" Aeson..= filterIsActive
+    , "path" Aeson..= Parser.toString jsonPath
+    , "predicate" Aeson..= Aeson.toJSON jsonPredicate]
 
-instance Aeson.FromJSON Filter where
-  parseJSON (Aeson.Array v) = case toList v of
-    [Aeson.String "Filter", Aeson.String path, predicate] ->
-      case Parser.getPath $ T.unpack path of
-       Right path -> Filter path <$> Aeson.parseJSON predicate
-       Left e -> mzero
-    -- [Aeson.String "AllFilters", filters] ->
-    --   AllFilters <$> Aeson.parseJSON filters
-    -- [Aeson.String "AnyFilters", filters] ->
-    --   AnyFilter <$> Aeson.parseJSON filters
+instance Aeson.FromJSON LogFilter where
+  parseJSON (Aeson.Object o) = do
+    -- I'd *like* to do this applicatively, but I'm not actually sure it's
+    -- possible at all, given the Either handling below.
+    name <- o Aeson..: "name"
+    predicate <- o Aeson..: "predicate"
+    pathText <- o Aeson..: "path"
+    isActive <- o Aeson..: "is_active"
+    let parsed = Parser.getPath pathText
+    case parsed of
+     Right path -> return LogFilter {filterName=name, filterIsActive=isActive,
+                                     jsonPredicate=predicate, jsonPath=path}
+     Left error -> fail ("Error when parsing jsonPath: " ++ show error)
   parseJSON _ = mzero
 
 matchPredicate :: JSONPredicate -> Aeson.Value -> Bool
@@ -106,30 +111,30 @@ matchPredicate (MatchesRegex expected) _ = error "Implement MatchesRegex"
 matchPredicate (HasKey expected) (Aeson.Object hm) = HM.member expected hm
 matchPredicate _ _ = False
 
-matchFilter :: Filter -> Aeson.Value -> Bool
-matchFilter (Filter jspath predicate) aesonValue
-  | Just gotValue <- jsonPath jspath aesonValue
-    = predicate `matchPredicate` gotValue
-matchFilter (AllFilters filters) aesonValue = all (`matchFilter` aesonValue) filters
-matchFilter (AnyFilter filters) aesonValue = any (`matchFilter` aesonValue) filters
+matchFilter :: LogFilter -> Aeson.Value -> Bool
+matchFilter (LogFilter {jsonPath, jsonPredicate}) aesonValue
+  | Just gotValue <- followPath jsonPath aesonValue
+    = jsonPredicate `matchPredicate` gotValue
 matchFilter _ _ = False
 
-filterMessages :: Seq.Seq (IsPinned, Aeson.Value) -> [Filter] -> Seq.Seq Aeson.Value
+filterMessages :: Seq.Seq (IsPinned, Aeson.Value) -> [LogFilter] -> Seq.Seq Aeson.Value
 filterMessages messages filters = snd <$> Seq.filter filt messages
-  where filt (pinned, json) = pinned || matchFilter (AllFilters filters) json
+  where filt (pinned, json) = pinned || all (`matchFilter` json) filters
 
 
 -- purely informative type synonyms
 type IsPinned = Bool
 type IsActive = Bool
 type FilterName = T.Text
-type Filters = [(FilterName, Filter)]
+type Filters = [LogFilter]
 type Messages = Seq.Seq (IsPinned, Aeson.Value)
 type MessagesRef = IORef Messages
 type FiltersRef = IORef Filters
 type ColumnsRef = IORef [T.Text]
 type CurrentlyFollowing = Bool
 type FiltersIndex = Int -- ^ Index into the FiltersRef sequence
+
+-- super general utilities
 
 replaceAtIndex :: Int -> a -> [a] -> [a]
 replaceAtIndex index item ls = a ++ (item:b) where (a, _:b) = splitAt index ls
@@ -142,6 +147,7 @@ removeSlice n m xs = take n xs ++ drop m xs
 
 removeIndex :: Int -> [a] -> [a]
 removeIndex n = removeSlice n (n+1)
+
 
 -- |Given a list of columns and a json value, format it.
 columnify :: [T.Text] -> Aeson.Value -> T.Text
@@ -193,8 +199,12 @@ makeEditField labelText = do
   field <- makeField labelText edit
   return (edit, field)
 
+
 makeMainWindow messagesRef filtersRef followingRef columnsRef = do
-  mainHeader <- UI.plainText "json-log-viewer by radix. ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, P=Pin message, F=Create Filter, C=Change Columns, E=Follow end, Ctrl+s=Save settings"
+  mainHeader <- UI.plainText "ESC=Exit, TAB=Switch section, D=Delete filter, \
+                             \RET=Open, P=Pin message, F=Create Filter, \
+                             \C=Change Columns, E=Follow end, \
+                             \Ctrl+s=Save settings"
   borderedMainHeader <- UI.bordered mainHeader
 
   messageHeader <- UI.plainText "Messages"
@@ -231,10 +241,10 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
 
   let refreshMessages = do
         messages <- readIORef messagesRef
-        namesAndFilters <- readIORef filtersRef
+        filters <- readIORef filtersRef
         -- update filters list
-        filterWidgets <- mapM (UI.plainText . fst) namesAndFilters
-        let filterItems = zip namesAndFilters filterWidgets
+        filterWidgets <- mapM (UI.plainText . filterName) filters
+        let filterItems = zip filters filterWidgets
         UI.clearList filterList
         UI.addMultipleToList filterList filterItems
         -- update messages list
@@ -242,12 +252,12 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
         currentlyFollowing <- readIORef followingRef
         columns <- readIORef columnsRef
         UI.setEditText columnsEdit $ T.intercalate ", " columns
-        addMessagesToUI namesAndFilters columns messageList messages currentlyFollowing
+        addMessagesToUI filters columns messageList messages currentlyFollowing
       addMessages newMessages = do
-        namesAndFilters <- readIORef filtersRef
+        filters <- readIORef filtersRef
         currentlyFollowing <- readIORef followingRef
         columns <- readIORef columnsRef
-        addMessagesToUI namesAndFilters columns messageList newMessages currentlyFollowing
+        addMessagesToUI filters columns messageList newMessages currentlyFollowing
 
   columnsEdit `UI.onActivate` \widg -> do
     columnsText <- UI.getEditText widg
@@ -261,7 +271,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
 
 addMessagesToUI :: Filters -> [T.Text] -> _Widget -> Messages -> CurrentlyFollowing -> IO ()
 addMessagesToUI filters columns messageList newMessages currentlyFollowing = do
-  let filteredMessages = toList $ filterMessages newMessages (fmap snd filters)
+  let filteredMessages = toList $ filterMessages newMessages filters
   messageWidgets <- mapM (UI.plainText . formatMessage columns) filteredMessages
   let messageItems = zip filteredMessages messageWidgets
   UI.addMultipleToList messageList messageItems
@@ -360,46 +370,42 @@ makeFilterEditWindow
   -> IO () -- ^ switchToMain function
   -> IO (UI.Widget _W -- ^ the main widget
         , UI.Widget UI.FocusGroup -- ^ the dialog's focus group
-        , FiltersIndex -> T.Text -> Filter -> IO ()) -- ^ the editFilter function
+        , FiltersIndex -> LogFilter -> IO ()) -- ^ the editFilter function
 makeFilterEditWindow filtersRef refreshMessages switchToMain = do
   dialogRec <- makeFilterDialog "Edit Filter" switchToMain
 
   -- YUCK
   filterIndexRef <- newIORef (Nothing :: Maybe FiltersIndex)
 
-  let editFilter index name filt = do
+  let editFilter index (LogFilter {jsonPath, jsonPredicate, filterName}) = do
         UI.focus (nameEdit dialogRec)
-        case filt of
-         Filter jspath jspred -> do
-           UI.setEditText (nameEdit dialogRec) name
-           UI.setEditText (jsonPathEdit dialogRec) $ Parser.toString jspath
-           case jspred of
-            (Equals jsonVal) -> do
-              UI.setCheckboxChecked (equalsCheck dialogRec)
-              case jsonVal of
-               Aeson.String jsonText -> -- only supporting texts here for now
-                 UI.setEditText (operandEdit dialogRec) jsonText
-            -- (MatchesRegex text) -> do return () -- TODO!
-            (HasSubstring text) -> do
-              UI.setCheckboxChecked (substringCheck dialogRec)
-              UI.setEditText (operandEdit dialogRec) text
-            (HasKey text) -> do
-              UI.setCheckboxChecked (hasKeyCheck dialogRec)
-              UI.setEditText (operandEdit dialogRec) text
-           writeIORef filterIndexRef $ Just index
-         AllFilters filts -> error "editing multiple filters not supported"
-         AnyFilter filts -> error "editing multiple filters not supported"
+        UI.setEditText (nameEdit dialogRec) filterName
+        UI.setEditText (jsonPathEdit dialogRec) $ Parser.toString jsonPath
+        case jsonPredicate of
+         (Equals jsonVal) -> do
+           UI.setCheckboxChecked (equalsCheck dialogRec)
+           case jsonVal of
+            Aeson.String jsonText -> -- only supporting texts here for now
+              UI.setEditText (operandEdit dialogRec) jsonText
+         -- (MatchesRegex text) -> do return () -- TODO!
+         (HasSubstring text) -> do
+           UI.setCheckboxChecked (substringCheck dialogRec)
+           UI.setEditText (operandEdit dialogRec) text
+         (HasKey text) -> do
+           UI.setCheckboxChecked (hasKeyCheck dialogRec)
+           UI.setEditText (operandEdit dialogRec) text
+        writeIORef filterIndexRef $ Just index
 
   filterDialog dialogRec `UI.onDialogAccept` \_ -> do
     maybeIndex <- readIORef filterIndexRef
     case maybeIndex of
      Nothing -> error "Error: trying to save an edited filter without knowing its index"
      Just index -> do
-       maybeNameAndFilt <- filterFromDialog dialogRec
-       case maybeNameAndFilt of
+       maybeFilt <- filterFromDialog dialogRec
+       case maybeFilt of
         Nothing -> return ()
-        Just pair -> do
-          modifyIORef filtersRef $ replaceAtIndex index pair
+        Just filt -> do
+          modifyIORef filtersRef $ replaceAtIndex index filt
           refreshMessages
           writeIORef filterIndexRef Nothing
           switchToMain
@@ -408,7 +414,7 @@ makeFilterEditWindow filtersRef refreshMessages switchToMain = do
 
 
 -- | Create a Filter based on the contents of a filter-editing dialog.
-filterFromDialog :: FilterDialog -> IO (Maybe (T.Text, Filter))
+filterFromDialog :: FilterDialog -> IO (Maybe LogFilter)
 filterFromDialog dialogRec = do
     pathText <- UI.getEditText (jsonPathEdit dialogRec)
     operand <- UI.getEditText (operandEdit dialogRec)
@@ -423,8 +429,11 @@ filterFromDialog dialogRec = do
     let mpath = Parser.getPath $ T.unpack pathText
     case mpath of
      Right path -> do
-       let filt = Filter path predicate
-       return $ Just (nameText, filt)
+       let filt = LogFilter {filterName=nameText,
+                             jsonPath=path,
+                             jsonPredicate=predicate,
+                             filterIsActive=True}
+       return $ Just filt
      Left e -> return Nothing
 
 makeFilterCreationWindow :: FiltersRef -> IO () -> IO () -> IO (UI.Widget _W, UI.Widget UI.FocusGroup, IO ())
@@ -434,8 +443,8 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
   filterDialog dialogRec `UI.onDialogAccept` \_ -> do
     maybeNameAndFilt <- filterFromDialog dialogRec
     case maybeNameAndFilt of
-     Just (name, filt) -> do
-       modifyIORef filtersRef ((name, filt):)
+     Just filt -> do
+       modifyIORef filtersRef (filt:)
        refreshMessages
        switchToMain
      Nothing -> return ()
@@ -517,7 +526,7 @@ linesReceived messagesRef filtersRef addMessages splitIndex newLines =
   -- hmm, or not, since this will be run in the vty-ui event loop.
   case newLines of
     Right newLines -> do
-      filters <- fmap snd <$> readIORef filtersRef
+      filters <- readIORef filtersRef
       let splitLines = map (snd . BS.splitAt splitIndex) newLines
           decoder = Aeson.decode :: BSL.ByteString -> Maybe Aeson.Value
           newJsons = mapMaybe (decoder . BSL.fromStrict) splitLines
@@ -634,8 +643,8 @@ startApp splitIndex filename = do
   filterList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
   messageList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
 
-  filterList `UI.onItemActivated` \(UI.ActivateItemEvent index (name, filt) _) -> do
-    editFilter index name filt
+  filterList `UI.onItemActivated` \(UI.ActivateItemEvent index filt _) -> do
+    editFilter index filt
     switchToFilterEdit
 
   filterList `UI.onKeyPressed` \_ key _ ->

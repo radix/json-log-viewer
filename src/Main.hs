@@ -119,7 +119,8 @@ matchFilter _ _ = False
 
 filterMessages :: Seq.Seq (IsPinned, Aeson.Value) -> [LogFilter] -> Seq.Seq Aeson.Value
 filterMessages messages filters = snd <$> Seq.filter filt messages
-  where filt (pinned, json) = pinned || all (`matchFilter` json) filters
+  where filt (pinned, json) = pinned || all (`matchFilter` json) activeFilters
+        activeFilters = filter filterIsActive filters
 
 
 -- purely informative type synonyms
@@ -200,11 +201,12 @@ makeEditField labelText = do
   return (edit, field)
 
 
+headerText ="ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, \
+            \P=Pin message, F=Create Filter, C=Change Columns, E=Follow end, \
+            \Ctrl+s=Save settings"
+
 makeMainWindow messagesRef filtersRef followingRef columnsRef = do
-  mainHeader <- UI.plainText "ESC=Exit, TAB=Switch section, D=Delete filter, \
-                             \RET=Open, P=Pin message, F=Create Filter, \
-                             \C=Change Columns, E=Follow end, \
-                             \Ctrl+s=Save settings"
+  mainHeader <- UI.plainText headerText
   borderedMainHeader <- UI.bordered mainHeader
 
   messageHeader <- UI.plainText "Messages"
@@ -227,23 +229,14 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
   headerAndBody <- UI.vBox borderedMainHeader hb
   ui <- UI.centered headerAndBody
 
-  messageList `UI.onKeyPressed` \_ key _ ->
-    case key of
-      Events.KHome -> UI.scrollToBeginning messageList >> return True
-      Events.KEnd -> UI.scrollToEnd messageList >> return True
-      _ -> return False
-
-  filterList `UI.onKeyPressed` \_ key _ ->
-    case key of
-      Events.KHome -> UI.scrollToBeginning filterList >> return True
-      Events.KEnd -> UI.scrollToEnd filterList >> return True
-      _ -> return False
-
   let refreshMessages = do
         messages <- readIORef messagesRef
         filters <- readIORef filtersRef
         -- update filters list
-        filterWidgets <- mapM (UI.plainText . filterName) filters
+        let renderFilter filt = if (filterIsActive filt)
+                                then T.append "* " $ filterName filt
+                                else T.append "- " $ filterName filt
+        filterWidgets <- mapM (UI.plainText . renderFilter) filters
         let filterItems = zip filters filterWidgets
         UI.clearList filterList
         UI.addMultipleToList filterList filterItems
@@ -258,6 +251,26 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
         currentlyFollowing <- readIORef followingRef
         columns <- readIORef columnsRef
         addMessagesToUI filters columns messageList newMessages currentlyFollowing
+      toggleSelectedFilterActive = do
+        selection <- UI.getSelected filterList
+        case selection of
+         Just (index, (filter, _)) -> do
+           let newFilt = filter {filterIsActive=not (filterIsActive filter)}
+           modifyIORef filtersRef $ replaceAtIndex index newFilt
+           refreshMessages
+
+  messageList `UI.onKeyPressed` \_ key _ ->
+    case key of
+      Events.KHome -> UI.scrollToBeginning messageList >> return True
+      Events.KEnd -> UI.scrollToEnd messageList >> return True
+      _ -> return False
+
+  filterList `UI.onKeyPressed` \_ key _ ->
+    case key of
+      Events.KHome -> UI.scrollToBeginning filterList >> return True
+      Events.KEnd -> UI.scrollToEnd filterList >> return True
+      Events.KChar ' ' -> toggleSelectedFilterActive >> return True
+      _ -> return False
 
   columnsEdit `UI.onActivate` \widg -> do
     columnsText <- UI.getEditText widg
@@ -570,7 +583,12 @@ startApp splitIndex filename = do
   -- UI stuff
 
   -- main window
-  (ui, messageList, filterList, refreshMessages, addMessages, columnsEdit) <- makeMainWindow messagesRef filtersRef followingRef columnsRef
+  (ui,
+   messageList,
+   filterList,
+   refreshMessages,
+   addMessages,
+   columnsEdit) <- makeMainWindow messagesRef filtersRef followingRef columnsRef
 
   forkIO $ streamLines filename 0 500000 (UI.schedule . linesReceived messagesRef filtersRef addMessages splitIndex)
 

@@ -39,17 +39,18 @@ import           System.Directory          (createDirectoryIfMissing,
 import           System.Environment        (getArgs)
 import           System.Exit               (exitSuccess)
 import           System.FilePath           (splitFileName, (</>))
-import           System.IO                 (IOMode (ReadMode),
-                                            SeekMode (AbsoluteSeek), hSeek,
-                                            openFile)
+import           System.IO                 (BufferMode (LineBuffering), Handle,
+                                            hIsSeekable, hSetBuffering,
+                                            hWaitForInput)
 import           System.IO.Error           (isDoesNotExistError)
 import           System.Posix.Files        (fileSize, getFileStatus)
+import           System.Posix.IO           (fdToHandle)
+import           System.Posix.Types        (Fd (Fd))
 import           Text.Read                 (readMaybe)
 
 import           Data.Aeson.Path           (JSONPath (..), JSONSelector,
                                             followPath)
 import qualified Data.Aeson.Path.Parser    as Parser
-import           TailF                     (streamLines)
 
 -- FILTRATION
 
@@ -531,43 +532,75 @@ linesReceived
   :: MessagesRef
   -> FiltersRef
   -> (Messages -> IO ()) -- ^ the addMessages function
-  -> Int -- ^ index to split each line at :( maybe replace this with a function
-  -> Either String [BS.ByteString] -- ^ the new line
+  -> [BS.ByteString] -- ^ the new line
   -> IO ()
-linesReceived messagesRef filtersRef addMessages splitIndex newLines =
+linesReceived messagesRef filtersRef addMessages newLines = do
   -- potential for race condition here I think!
   -- hmm, or not, since this will be run in the vty-ui event loop.
-  case newLines of
-    Right newLines -> do
-      filters <- readIORef filtersRef
-      let splitLines = map (snd . BS.splitAt splitIndex) newLines
-          decoder = Aeson.decode :: BSL.ByteString -> Maybe Aeson.Value
-          newJsons = mapMaybe (decoder . BSL.fromStrict) splitLines
-          newMessages = Seq.fromList $ map (False,) newJsons
-      modifyIORef messagesRef (Seq.>< newMessages)
-      addMessages newMessages
-    Left message -> error message
+  filters <- readIORef filtersRef
+  let decoder = Aeson.decode :: BSL.ByteString -> Maybe Aeson.Value
+      newJsons = mapMaybe (decoder . BSL.fromStrict) newLines
+      newMessages = Seq.fromList $ map (False,) newJsons
+  modifyIORef messagesRef (Seq.>< newMessages)
+  addMessages newMessages
 
 
-usage = "json-log-viewer [--split-at <col>] FILENAME \n\
-        \--split-at takes an column number and only considers the data to\n\
-        \the right of that column in each line of the file.\n\
-        \oh and don't use `--split-at=n`, only `--split-at n`, sorry"
+streamLines :: Handle -> ([BS.ByteString] -> IO ()) -> IO ()
+streamLines handle callback = do
+  isNormalFile <- hIsSeekable handle
+  if isNormalFile then do
+    -- in this case we just slurp the file and call the callback and stop
+    contents <- BS.hGetContents handle
+    let lines = BS.split 10 contents
+    callback lines
+  else do
+    -- it's a real stream, so let's stream it
+    hSetBuffering handle LineBuffering
+    forever $ do
+      lines <- hGetLines handle
+      if (not $ null lines) then do
+        callback lines
+      else do
+        -- fall back to a blocking read now that we've reached the end of the
+        -- stream
+        line <- BS.hGetLine handle
+        callback [line]
+
+-- |Get all the lines available from a handle, *hopefully* without blocking
+-- This will sadly still block if there is a partial line at the end of the
+-- stream and no more data is being written. hGetBufNonBlocking would allow me
+-- to work around this problem, but then I'd have to keep my own buffer!
+hGetLines :: Handle -> IO [BS.ByteString]
+hGetLines handle = do
+  readable <- hWaitForInput handle 0
+  if readable then do
+    line <- BS.hGetLine handle
+    lines <- hGetLines handle
+    return (line:lines)
+  else do
+    return []
+
+
+usage = " \n\
+\USAGE: json-log-viewer 3< <(tail -F LOGFILE) -- for streaming\n\
+\       json-log-viewer 3< LOGFILE -- to load a file without streaming\n\
+\\n\
+\Input must be JSON documents, one per line.\n\
+\\n\
+\This syntax works with bash and zsh. \n\
+\\n\
+\fish supports file redirection but I haven't figured out the syntax for \n\
+\pipe redirection."
 
 main = do
   args <- getArgs
   case args of
-        [] -> error usage
+        [] -> startApp
         ["-h"] -> error usage
         ["--help"] -> error usage
-        ["--split-at", n, filename] ->
-          case (readMaybe n :: Maybe Int) of
-          Just n -> startApp n filename
-          Nothing -> error usage
-        [filename] -> startApp 0 filename
         _ -> error usage
 
-startApp splitIndex filename = do
+startApp = do
   -- mutable variablessss
   messagesRef <- newIORef Seq.empty :: IO MessagesRef
   filtersRef <- newIORef [] :: IO FiltersRef
@@ -590,7 +623,9 @@ startApp splitIndex filename = do
    addMessages,
    columnsEdit) <- makeMainWindow messagesRef filtersRef followingRef columnsRef
 
-  forkIO $ streamLines filename 0 500000 (UI.schedule . linesReceived messagesRef filtersRef addMessages splitIndex)
+  handle <- fdToHandle $ Fd 3 -- I'm not sure if there's a reason to support
+                              -- FDs other than 3?
+  forkIO $ streamLines handle (UI.schedule . linesReceived messagesRef filtersRef addMessages)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList

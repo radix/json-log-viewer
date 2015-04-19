@@ -38,8 +38,7 @@ import           System.Environment        (getArgs)
 import           System.Exit               (exitSuccess)
 import           System.FilePath           (splitFileName, (</>))
 import           System.IO                 (BufferMode (LineBuffering), Handle,
-                                            hIsSeekable, hSetBuffering,
-                                            hWaitForInput)
+                                            hIsSeekable, hReady, hSetBuffering)
 import           System.IO.Error           (isDoesNotExistError)
 import           System.Posix.IO           (fdToHandle)
 import           System.Posix.Types        (Fd (Fd))
@@ -242,7 +241,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
         messages <- readIORef messagesRef
         filters <- readIORef filtersRef
         -- update filters list
-        let renderFilter filt = if (filterIsActive filt)
+        let renderFilter filt = if filterIsActive filt
                                 then T.append "* " $ filterName filt
                                 else T.append "- " $ filterName filt
         filterWidgets <- mapM (UI.plainText . renderFilter) filters
@@ -555,16 +554,13 @@ linesReceived addMessages newLines = do
 streamLines :: Handle -> ([BS.ByteString] -> IO ()) -> IO ()
 streamLines handle callback = do
   isNormalFile <- hIsSeekable handle
-  if isNormalFile then do
-    -- in this case we just slurp the file and call the callback and stop
-    callback =<< BS.split 10 <$> BS.hGetContents handle
+  if isNormalFile then callback =<< BS.split 10 <$> BS.hGetContents handle
   else do
     -- it's a real stream, so let's stream it
     hSetBuffering handle LineBuffering
     forever $ do
       availableLines <- hGetLines handle
-      if (not $ null availableLines) then do
-        callback availableLines
+      if not $ null availableLines then callback availableLines
       else do
         -- fall back to a blocking read now that we've reached the end of the
         -- stream
@@ -577,9 +573,9 @@ streamLines handle callback = do
 -- to work around this problem, but then I'd have to keep my own buffer!
 hGetLines :: Handle -> IO [BS.ByteString]
 hGetLines handle = do
-  readable <- hWaitForInput handle 0
+  readable <- hReady handle
   if readable then (:) <$> BS.hGetLine handle <*> hGetLines handle
-  else do return []
+  else return []
 
 
 usage :: String

@@ -10,8 +10,7 @@
 module Main where
 
 
-import           Control.Concurrent        (forkIO, threadDelay)
-import           Control.Concurrent.MVar   (MVar (..), putMVar, takeMVar)
+import           Control.Concurrent        (forkIO)
 import           Control.Exception         (tryJust)
 import           Control.Monad             (forM_, forever, guard, liftM, mzero,
                                             when)
@@ -25,8 +24,7 @@ import           Data.Foldable             (toList)
 import qualified Data.HashMap.Strict       as HM
 import           Data.IORef                (IORef, modifyIORef, newIORef,
                                             readIORef, writeIORef)
-import           Data.List                 (splitAt)
-import           Data.Maybe                (fromMaybe, mapMaybe, maybe)
+import           Data.Maybe                (fromMaybe, mapMaybe)
 import qualified Data.Sequence             as Seq
 import qualified Data.Text                 as T
 import           Data.Text.Encoding        (decodeUtf8)
@@ -43,13 +41,10 @@ import           System.IO                 (BufferMode (LineBuffering), Handle,
                                             hIsSeekable, hSetBuffering,
                                             hWaitForInput)
 import           System.IO.Error           (isDoesNotExistError)
-import           System.Posix.Files        (fileSize, getFileStatus)
 import           System.Posix.IO           (fdToHandle)
 import           System.Posix.Types        (Fd (Fd))
-import           Text.Read                 (readMaybe)
 
-import           Data.Aeson.Path           (JSONPath (..), JSONSelector,
-                                            followPath)
+import           Data.Aeson.Path           (JSONPath (..), followPath)
 import qualified Data.Aeson.Path.Parser    as Parser
 
 -- FILTRATION
@@ -67,6 +62,7 @@ data LogFilter = LogFilter
   , filterName     :: T.Text
   , filterIsActive :: IsActive} deriving Show
 
+lArray :: [Aeson.Value] -> Aeson.Value
 lArray = Aeson.Array . V.fromList
 
 instance Aeson.ToJSON JSONPredicate where
@@ -102,13 +98,13 @@ instance Aeson.FromJSON LogFilter where
     case parsed of
      Right path -> return LogFilter {filterName=name, filterIsActive=isActive,
                                      jsonPredicate=predicate, jsonPath=path}
-     Left error -> fail ("Error when parsing jsonPath: " ++ show error)
+     Left e -> fail ("Error when parsing jsonPath: " ++ show e)
   parseJSON _ = mzero
 
 matchPredicate :: JSONPredicate -> Aeson.Value -> Bool
 matchPredicate (Equals expected)       got = expected == got
 matchPredicate (HasSubstring expected) (Aeson.String got) = expected `T.isInfixOf` got
-matchPredicate (MatchesRegex expected) _ = error "Implement MatchesRegex"
+matchPredicate (MatchesRegex _) _ = error "Implement MatchesRegex"
 matchPredicate (HasKey expected) (Aeson.Object hm) = HM.member expected hm
 matchPredicate _ _ = False
 
@@ -192,20 +188,32 @@ data FilterDialog = FilterDialog {
   , setDefaults        :: IO ()
   }
 
+makeField :: (Show a) => T.Text -> UI.Widget a -> IO (UI.Widget _W)
 makeField labelText widget = do
   label <- UI.plainText labelText
   UI.hBox label widget
 
+makeEditField :: T.Text -> IO (UI.Widget UI.Edit, UI.Widget _W)
 makeEditField labelText = do
   edit <- UI.editWidget
   field <- makeField labelText edit
   return (edit, field)
 
 
-headerText ="ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, \
-            \P=Pin message, F=Create Filter, C=Change Columns, E=Follow end, \
-            \Ctrl+s=Save settings"
+headerText :: T.Text
+headerText = "ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, \
+             \P=Pin message, F=Create Filter, C=Change Columns, E=Follow end, \
+             \Ctrl+s=Save settings"
 
+makeMainWindow
+  :: MessagesRef -> FiltersRef -> IORef Bool -> ColumnsRef
+  -> IO (UI.Widget _W, -- ^ main widget
+         UI.Widget (UI.List Aeson.Types.Value UI.FormattedText), -- ^ message list
+         UI.Widget (UI.List LogFilter UI.FormattedText), -- ^ filter list
+         IO (), -- ^ refreshMessages
+         Seq.Seq (IsPinned, Aeson.Types.Value) -> IO (), -- ^ addmessage
+         UI.Widget UI.Edit -- ^ column edit widget
+        )
 makeMainWindow messagesRef filtersRef followingRef columnsRef = do
   mainHeader <- UI.plainText headerText
   borderedMainHeader <- UI.bordered mainHeader
@@ -248,6 +256,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
         UI.setEditText columnsEdit $ T.intercalate ", " columns
         addMessagesToUI filters columns messageList messages currentlyFollowing
       addMessages newMessages = do
+        modifyIORef messagesRef (Seq.>< newMessages)
         filters <- readIORef filtersRef
         currentlyFollowing <- readIORef followingRef
         columns <- readIORef columnsRef
@@ -255,8 +264,8 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
       toggleSelectedFilterActive = do
         selection <- UI.getSelected filterList
         case selection of
-         Just (index, (filter, _)) -> do
-           let newFilt = filter {filterIsActive=not (filterIsActive filter)}
+         Just (index, (filt, _)) -> do
+           let newFilt = filt {filterIsActive=not (filterIsActive filt)}
            modifyIORef filtersRef $ replaceAtIndex index newFilt
            refreshMessages
 
@@ -291,15 +300,16 @@ addMessagesToUI filters columns messageList newMessages currentlyFollowing = do
   UI.addMultipleToList messageList messageItems
   when currentlyFollowing $ UI.scrollToEnd messageList
 
+makeMessageDetailWindow :: IO (UI.Widget _W, UI.Widget UI.FormattedText)
 makeMessageDetailWindow = do
-  mdHeader <- UI.plainText "Message Detail. ESC=return"
-  mdHeader <- UI.bordered mdHeader
+  mdHeader' <- UI.plainText "Message Detail. ESC=return"
+  mdHeader <- UI.bordered mdHeader'
   mdBody <- UI.plainText "Insert message here."
   messageDetail <- UI.vBox mdHeader mdBody
   return (messageDetail, mdBody)
 
 -- |Create a general filter UI.
-makeFilterDialog :: String -> IO () -> IO FilterDialog
+makeFilterDialog :: T.Text -> IO () -> IO FilterDialog
 makeFilterDialog dialogName switchToMain = do
   (nameEdit, nameField) <- makeEditField "Filter Name:"
   (jsonPathEdit, jsonPathField) <- makeEditField "JSON Path:"
@@ -316,8 +326,9 @@ makeFilterDialog dialogName switchToMain = do
   UI.addToRadioGroup operatorRadioGroup hasKeyCheck
 
   UI.setCheckboxChecked substringCheck
-  operatorRadioChecks <- UI.hBox substringCheck hasKeyCheck
-  operatorRadioChecks <- UI.hBox equalsCheck operatorRadioChecks
+  operatorRadioChecks'' <- UI.hBox substringCheck hasKeyCheck
+  operatorRadioChecks' <- UI.hBox equalsCheck operatorRadioChecks''
+  operatorRadioChecks <- UI.hBox operatorLabel operatorRadioChecks'
 
   (operandEdit, operandField) <- makeEditField "Operand:"
 
@@ -329,10 +340,10 @@ makeFilterDialog dialogName switchToMain = do
   addRow operatorRadioChecks
   addRow operandField
 
-  (filterDialog, filterFg) <- UI.newDialog dialogBody "Filter"
+  (filterDialog, filterFg) <- UI.newDialog dialogBody dialogName
 
   let returnKeyMeansNext = [nameEdit, jsonPathEdit, operandEdit]
-  forM_ returnKeyMeansNext (`UI.onActivate` (\x -> UI.focusNext filterFg))
+  forM_ returnKeyMeansNext (`UI.onActivate` (\_ -> UI.focusNext filterFg))
 
   let addFocus = UI.addToFocusGroup filterFg
   addFocus nameEdit
@@ -345,8 +356,8 @@ makeFilterDialog dialogName switchToMain = do
   jsonPathEdit `UI.onChange` \text -> do
     let path = Parser.getPath $ T.unpack text
     case path of
-     (Left error) -> UI.setText parseStatusText $ T.pack $ show error
-     (Right parse) -> UI.setText parseStatusText "Valid! :-)"
+     (Left e) -> UI.setText parseStatusText $ T.pack $ show e
+     (Right _) -> UI.setText parseStatusText "Valid! :-)"
 
   filterFg `UI.onKeyPressed` \_ key _ ->
     case key of
@@ -448,7 +459,7 @@ filterFromDialog dialogRec = do
                              jsonPredicate=predicate,
                              filterIsActive=True}
        return $ Just filt
-     Left e -> return Nothing
+     Left _ -> return Nothing
 
 makeFilterCreationWindow :: FiltersRef -> IO () -> IO () -> IO (UI.Widget _W, UI.Widget UI.FocusGroup, IO ())
 makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
@@ -471,10 +482,10 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
 
 getSettingsFilePath :: IO FilePath
 getSettingsFilePath =
-  getHomeDirectory `and` (</> ".config"
+  getHomeDirectory `plus` (</> ".config"
                           </> "json-log-viewer"
                           </> "settings.json")
-  where and l r = liftM r l
+  where plus l r = liftM r l
 
 writeSettingsFile :: FilePath -> Filters -> [T.Text] -> IO ()
 writeSettingsFile fp filters columns = do
@@ -498,7 +509,7 @@ loadSettingsFile :: FilePath -> IO (Filters, [T.Text])
 loadSettingsFile fp = do
   e <- tryJust (guard . isDoesNotExistError) (BSL.readFile fp)
   case e of
-   Left e -> return ([], [])
+   Left _ -> return ([], [])
    Right bytes -> return $ parseSettings bytes
 
 makeSaveSettingsDialog
@@ -529,19 +540,15 @@ makeSaveSettingsDialog filtersRef columnsRef switchToMain = do
 
 -- |Handle lines that are coming in from our "tail" process.
 linesReceived
-  :: MessagesRef
-  -> FiltersRef
-  -> (Messages -> IO ()) -- ^ the addMessages function
+  :: (Messages -> IO ()) -- ^ the addMessages function
   -> [BS.ByteString] -- ^ the new line
   -> IO ()
-linesReceived messagesRef filtersRef addMessages newLines = do
+linesReceived addMessages newLines = do
   -- potential for race condition here I think!
   -- hmm, or not, since this will be run in the vty-ui event loop.
-  filters <- readIORef filtersRef
   let decoder = Aeson.decode :: BSL.ByteString -> Maybe Aeson.Value
       newJsons = mapMaybe (decoder . BSL.fromStrict) newLines
       newMessages = Seq.fromList $ map (False,) newJsons
-  modifyIORef messagesRef (Seq.>< newMessages)
   addMessages newMessages
 
 
@@ -550,16 +557,14 @@ streamLines handle callback = do
   isNormalFile <- hIsSeekable handle
   if isNormalFile then do
     -- in this case we just slurp the file and call the callback and stop
-    contents <- BS.hGetContents handle
-    let lines = BS.split 10 contents
-    callback lines
+    callback =<< BS.split 10 <$> BS.hGetContents handle
   else do
     -- it's a real stream, so let's stream it
     hSetBuffering handle LineBuffering
     forever $ do
-      lines <- hGetLines handle
-      if (not $ null lines) then do
-        callback lines
+      availableLines <- hGetLines handle
+      if (not $ null availableLines) then do
+        callback availableLines
       else do
         -- fall back to a blocking read now that we've reached the end of the
         -- stream
@@ -573,14 +578,11 @@ streamLines handle callback = do
 hGetLines :: Handle -> IO [BS.ByteString]
 hGetLines handle = do
   readable <- hWaitForInput handle 0
-  if readable then do
-    line <- BS.hGetLine handle
-    lines <- hGetLines handle
-    return (line:lines)
-  else do
-    return []
+  if readable then (:) <$> BS.hGetLine handle <*> hGetLines handle
+  else do return []
 
 
+usage :: String
 usage = " \n\
 \USAGE: json-log-viewer 3< <(tail -F LOGFILE) -- for streaming\n\
 \       json-log-viewer 3< LOGFILE -- to load a file without streaming\n\
@@ -592,6 +594,7 @@ usage = " \n\
 \fish supports file redirection but I haven't figured out the syntax for \n\
 \pipe redirection."
 
+main :: IO ()
 main = do
   args <- getArgs
   case args of
@@ -600,6 +603,7 @@ main = do
         ["--help"] -> error usage
         _ -> error usage
 
+startApp :: IO ()
 startApp = do
   -- mutable variablessss
   messagesRef <- newIORef Seq.empty :: IO MessagesRef
@@ -625,7 +629,7 @@ startApp = do
 
   handle <- fdToHandle $ Fd 3 -- I'm not sure if there's a reason to support
                               -- FDs other than 3?
-  forkIO $ streamLines handle (UI.schedule . linesReceived messagesRef filtersRef addMessages)
+  forkIO $ streamLines handle (UI.schedule . linesReceived addMessages)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList
@@ -705,7 +709,7 @@ startApp = do
      (Events.KChar 'd') -> do
        selected <- UI.getSelected filterList
        case selected of
-        Just (index, (item, widg)) -> do
+        Just (index, _) -> do
           UI.removeFromList filterList index
           modifyIORef filtersRef (removeIndex index)
           refreshMessages

@@ -115,12 +115,14 @@ matchFilter _ _ = False
 
 filterMessages :: Seq.Seq (IsPinned, Aeson.Value) -> [LogFilter] -> Seq.Seq Aeson.Value
 filterMessages messages filters = snd <$> Seq.filter filt messages
-  where filt (pinned, json) = pinned || all (`matchFilter` json) activeFilters
+  where filt :: (IsPinned, Aeson.Value) -> Bool
+        filt (pinned, json) = unIsPinned pinned || all (`matchFilter` json) activeFilters
         activeFilters = filter filterIsActive filters
 
 
 -- purely informative type synonyms
-type IsPinned = Bool
+newtype IsPinned = IsPinned { unIsPinned :: Bool } deriving Show
+newtype LinesCallback = LinesCallback { unLinesCallback :: [BS.ByteString] -> IO () }
 type IsActive = Bool
 type FilterName = T.Text
 type Filters = [LogFilter]
@@ -547,25 +549,26 @@ linesReceived addMessages newLines = do
   -- hmm, or not, since this will be run in the vty-ui event loop.
   let decoder = Aeson.decode :: BSL.ByteString -> Maybe Aeson.Value
       newJsons = mapMaybe (decoder . BSL.fromStrict) newLines
-      newMessages = Seq.fromList $ map (False,) newJsons
+      newMessages = Seq.fromList $ map (IsPinned False,) newJsons
   addMessages newMessages
 
-
-streamLines :: Handle -> ([BS.ByteString] -> IO ()) -> IO ()
+-- |Given a Handle, call the callback function
+streamLines :: Handle -> LinesCallback -> IO ()
 streamLines handle callback = do
   isNormalFile <- hIsSeekable handle
-  if isNormalFile then callback =<< BS.split 10 <$> BS.hGetContents handle
+  if isNormalFile then cb =<< BS.split 10 <$> BS.hGetContents handle
   else do
     -- it's a real stream, so let's stream it
     hSetBuffering handle LineBuffering
     forever $ do
       availableLines <- hGetLines handle
-      if not $ null availableLines then callback availableLines
+      if not $ null availableLines then cb availableLines
       else do
         -- fall back to a blocking read now that we've reached the end of the
         -- stream
         line <- BS.hGetLine handle
-        callback [line]
+        cb [line]
+  where cb = unLinesCallback callback
 
 -- |Get all the lines available from a handle, *hopefully* without blocking
 -- This will sadly still block if there is a partial line at the end of the
@@ -625,7 +628,7 @@ startApp = do
 
   handle <- fdToHandle $ Fd 3 -- I'm not sure if there's a reason to support
                               -- FDs other than 3?
-  forkIO $ streamLines handle (UI.schedule . linesReceived addMessages)
+  forkIO $ streamLines handle $ LinesCallback (UI.schedule . linesReceived addMessages)
 
   mainFg <- UI.newFocusGroup
   UI.addToFocusGroup mainFg messageList

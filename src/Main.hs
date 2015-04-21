@@ -307,6 +307,14 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
         columns <- readIORef columnsRef
         UI.setEditText columnsEdit $ T.intercalate ", " columns
         addMessagesToUI filters columns messageList messages currentlyFollowing
+        -- update pinned messages (in case columns changed)
+        pinnedSize <- UI.getListSize pinnedList
+        let rerenderPinned index = do
+              mPinnedWidget <- UI.getListItem pinnedList index
+              case mPinnedWidget of
+               Just ((_, json), widget) -> UI.setText widget $ formatMessage columns json
+               Nothing -> error "could't find pinned item when going through what should be all of its valid indices"
+        mapM_ rerenderPinned [0..pinnedSize - 1]
       addMessages newMessages = do
         modifyIORef messagesRef (Seq.>< newMessages)
         filters <- readIORef filtersRef

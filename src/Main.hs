@@ -244,7 +244,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
                return pinBorder
                <-->
                return borderedMessages
-  leftArea <- return borderedFilters
+  let leftArea = borderedFilters
   body <- return leftArea <++> return rightArea
   UI.setBoxChildSizePolicy body $ UI.Percentage 15
   headerAndBody <- return mainHeader

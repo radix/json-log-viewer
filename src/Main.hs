@@ -9,6 +9,27 @@
 
 module Main where
 
+-- There are a few big gross things about this app
+-- 1. The code is poorly factored (my fault)
+-- 2. There is no good "model/view" layer in vty-ui. Dealing with the lists of
+--    messages, pinned messages, and filters, is tedious and error-prone. If
+--    List widgets wrapped and observed ListModels instead of making me
+--    manually manage everything in the list, everything would be a lot
+--    better. I could certainly implement such a layer myself but so far I
+--    have just suffered through it.
+-- 3. All the UI setup code is pointlessly in the IO monad. It seems so much
+--    better to me (a Haskell newbie, so take that with a grain of salt) that
+--    only runUi, various "set" functions, and event handlers should return IO,
+--    and there should be some applicative API for constructing trees of
+--    widgets.
+-- 4. (I'm not so sure on this one) Widget types depend on their contents. I
+--    like the idea of strongly typing as much as possible, but it's annoyed me
+--    a few times. The annoyance is drastically lessened with use of GHC's new
+--    "partial type signatures", so I can just try to ignore the contents of
+--    widgets.
+-- 5. There's no show/hide mechanism in vty-ui, and the "Group" widget will
+--    only allow replacing a widget with the *same type* of widget (see #4).
+
 
 import           Control.Concurrent        (forkIO)
 import           Control.Exception         (tryJust)
@@ -300,6 +321,26 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
            modifyIORef filtersRef $ replaceAtIndex index newFilt
            refreshMessages
          Nothing -> return ()
+      pin index msg = do
+        columns <- readIORef columnsRef
+        modifyIORef messagesRef $ Seq.update index (IsPinned True, msg)
+        listItemWidget <- UI.plainText $ formatMessage columns msg
+        -- figure out the index at which we must insert the widget
+        -- (to keep it sorted by messagelist index)
+        mPinnedIndex <- UI.listFindFirstBy ((> index) . fst) pinnedList
+        pinIndex <- case mPinnedIndex of
+          Just pinnedIndex -> return pinnedIndex
+          Nothing -> UI.getListSize pinnedList
+        UI.insertIntoList pinnedList (index, msg) listItemWidget pinIndex
+        UI.setSelected pinnedList pinIndex
+      unPin index msg = do
+        modifyIORef messagesRef $ Seq.update index (IsPinned False, msg)
+        mPinnedIndex <- UI.listFindFirstBy ((== index) . fst) pinnedList
+        case mPinnedIndex of
+         Just pinnedIndex -> do
+           _ <- UI.removeFromList pinnedList pinnedIndex
+           return ()
+         Nothing -> error "Couldn't find pinned list item but pinned was true, this shouldn't happen."
 
   messageList `UI.onKeyPressed` \_ key _ ->
     case key of
@@ -313,27 +354,25 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
            let message = messages `Seq.index` index
                isPinned = unIsPinned $ fst message
                msgJson = snd message
-               newMessage = (IsPinned $ not isPinned, msgJson)
-           columns <- readIORef columnsRef
-           modifyIORef messagesRef $ Seq.update index newMessage
            if not isPinned
-             then do listItemWidget <- UI.plainText $ formatMessage columns msgJson
-                     -- figure out the index at which we must insert the widget
-                     -- (to keep it sorted by messagelist index)
-                     mPinnedIndex <- UI.listFindFirstBy ((> index) . fst) pinnedList
-                     pinIndex <- case mPinnedIndex of
-                      Just pinnedIndex -> return pinnedIndex
-                      Nothing -> UI.getListSize pinnedList
-                     UI.insertIntoList pinnedList (index, msgJson) listItemWidget pinIndex
-                     UI.setSelected pinnedList pinIndex
-             else do mPinnedIndex <- UI.listFindFirstBy ((== index) . fst) pinnedList
-                     case mPinnedIndex of
-                      Just pinnedIndex -> do _ <- UI.removeFromList pinnedList pinnedIndex
-                                             return ()
-                      Nothing -> error "Couldn't find pinned list item but pinned was true, this shouldn't happen."
+             then pin index msgJson
+             else unPin index msgJson
            return True
          Nothing -> return True
       _ -> return False
+
+  pinnedList `UI.onKeyPressed` \_ key _ ->
+    case key of
+     (Events.KChar 'p') -> do
+       selection <- UI.getSelected pinnedList
+       case selection of
+        -- note that the bound index here is the messageList index, not the
+        -- pinnedList index.
+        Just (_, ((index, msg), _)) -> unPin index msg
+        Nothing -> return ()
+       return True
+     _ -> return False
+
 
   filterList `UI.onKeyPressed` \_ key _ ->
     case key of

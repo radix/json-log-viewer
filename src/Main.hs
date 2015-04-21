@@ -13,7 +13,8 @@ module Main where
 import           Control.Concurrent        (forkIO)
 import           Control.Exception         (tryJust)
 import           Control.Monad             (forM_, forever, guard, liftM, mzero,
-                                            when, void)
+                                            void, when)
+import           Data.Aeson                ((.:), (.=))
 import qualified Data.Aeson                as Aeson
 import           Data.Aeson.Encode.Pretty  (encodePretty)
 import qualified Data.Aeson.Types          as Aeson.Types
@@ -82,19 +83,19 @@ instance Aeson.FromJSON JSONPredicate where
 
 instance Aeson.ToJSON LogFilter where
   toJSON (LogFilter {..}) = Aeson.object [
-    "name" Aeson..= filterName
-    , "is_active" Aeson..= unIsActive filterIsActive
-    , "path" Aeson..= Parser.toString jsonPath
-    , "predicate" Aeson..= Aeson.toJSON jsonPredicate]
+    "name" .= filterName
+    , "is_active" .= unIsActive filterIsActive
+    , "path" .= Parser.toString jsonPath
+    , "predicate" .= Aeson.toJSON jsonPredicate]
 
 instance Aeson.FromJSON LogFilter where
   parseJSON (Aeson.Object o) = do
     -- I'd *like* to do this applicatively, but I'm not actually sure it's
     -- possible at all, given the Either handling below.
-    name <- o Aeson..: "name"
-    predicate <- o Aeson..: "predicate"
-    pathText <- o Aeson..: "path"
-    isActive <- o Aeson..: "is_active"
+    name <- o .: "name"
+    predicate <- o .: "predicate"
+    pathText <- o .: "path"
+    isActive <- o .: "is_active"
     let parsed = Parser.getPath pathText
     case parsed of
      Right path -> return LogFilter {filterName=name,
@@ -129,7 +130,8 @@ newtype LinesCallback = LinesCallback { unLinesCallback :: [BS.ByteString] -> IO
 newtype IsActive = IsActive {unIsActive :: Bool } deriving Show
 type FilterName = T.Text
 type Filters = [LogFilter]
-type Messages = Seq.Seq (IsPinned, Aeson.Value)
+type Message = (IsPinned, Aeson.Value)
+type Messages = Seq.Seq Message
 type MessagesRef = IORef Messages
 type FiltersRef = IORef Filters
 type ColumnsRef = IORef [T.Text]
@@ -172,7 +174,7 @@ columnify columns message =
 -- |Given a list of columns and a json value, format it. If columns is null,
 -- the plain json is returned.
 formatMessage :: [T.Text] -> Aeson.Value -> T.Text
-formatMessage columns message= if null columns
+formatMessage columns message = if null columns
                                 then jsonToText message
                                 else columnify columns message
 
@@ -211,40 +213,43 @@ headerText = "ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, \
 
 makeMainWindow
   :: MessagesRef -> FiltersRef -> IORef Bool -> ColumnsRef
-  -> IO (UI.Widget _W, -- ^ main widget
-         UI.Widget (UI.List Aeson.Types.Value UI.FormattedText), -- ^ message list
+  -> IO (UI.Widget _W , -- ^ main widget
+         UI.Widget (UI.List () UI.FormattedText), -- ^ message list
          UI.Widget (UI.List LogFilter UI.FormattedText), -- ^ filter list
+         UI.Widget (UI.List (Int, Aeson.Value) UI.FormattedText), -- ^ pinned list
          IO (), -- ^ refreshMessages
          Seq.Seq (IsPinned, Aeson.Types.Value) -> IO (), -- ^ addmessage
          UI.Widget UI.Edit -- ^ column edit widget
         )
 makeMainWindow messagesRef filtersRef followingRef columnsRef = do
   mainHeader <- UI.plainText headerText
-  borderedMainHeader <- UI.bordered mainHeader
 
-  messageHeader <- UI.plainText "Messages"
   messageList <- UI.newList 1
   borderedMessages <- UI.bordered messageList
+                      >>= UI.withBorderedLabel "Messages"
 
-  filterHeader <- UI.plainText "Filters"
+  -- The pinnedList data is a tuple of the *messages* index and the json value.
+  pinnedList <- UI.newList 1 :: IO (UI.Widget (UI.List (Int, Aeson.Value) UI.FormattedText))
+  pinBorder <- UI.bordered pinnedList
+               >>= UI.withBorderedLabel "Pinned Messages"
+
   filterList <- UI.newList 1
   borderedFilters <- UI.bordered filterList
+                     >>= UI.withBorderedLabel "Filters"
 
-  columnsLabel <- UI.plainText "Columns:"
-  columnsEdit <- UI.editWidget
-  columnEditor <- UI.hBox columnsLabel columnsEdit
+  (columnsEdit, columnsField) <- makeEditField "Columns:"
 
-  rightArea <- return columnEditor
+  rightArea <- return columnsField
                <-->
-               return messageHeader
+               return pinBorder
                <-->
                return borderedMessages
-  leftArea <- return filterHeader
-              <-->
-              return borderedFilters
+  leftArea <- return borderedFilters
   body <- return leftArea <++> return rightArea
   UI.setBoxChildSizePolicy body $ UI.Percentage 15
-  headerAndBody <- UI.vBox borderedMainHeader body
+  headerAndBody <- return mainHeader
+                   <-->
+                   return body
   ui <- UI.centered headerAndBody
 
   let refreshMessages = do
@@ -283,6 +288,34 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
     case key of
       Events.KHome -> UI.scrollToBeginning messageList >> return True
       Events.KEnd -> UI.scrollToEnd messageList >> return True
+      (Events.KChar 'p') -> do
+        selection <- UI.getSelected messageList
+        case selection of
+         Just (index, (_, _)) -> do
+           messages <- readIORef messagesRef
+           let message = messages `Seq.index` index
+               isPinned = unIsPinned $ fst message
+               msgJson = snd message
+               newMessage = (IsPinned $ not isPinned, msgJson)
+           columns <- readIORef columnsRef
+           modifyIORef messagesRef $ Seq.update index newMessage
+           if not isPinned
+             then do listItemWidget <- UI.plainText $ formatMessage columns msgJson
+                     -- figure out the index at which we must insert the widget
+                     -- (to keep it sorted by messagelist index)
+                     mPinnedIndex <- UI.listFindFirstBy ((> index) . fst) pinnedList
+                     pinIndex <- case mPinnedIndex of
+                      Just pinnedIndex -> return pinnedIndex
+                      Nothing -> UI.getListSize pinnedList
+                     UI.insertIntoList pinnedList (index, msgJson) listItemWidget pinIndex
+                     UI.setSelected pinnedList pinIndex
+             else do mPinnedIndex <- UI.listFindFirstBy ((== index) . fst) pinnedList
+                     case mPinnedIndex of
+                      Just pinnedIndex -> do _ <- UI.removeFromList pinnedList pinnedIndex
+                                             return ()
+                      Nothing -> error "Couldn't find pinned list item but pinned was true, this shouldn't happen."
+           return True
+         Nothing -> error "No messages is selected but this should be impossible"
       _ -> return False
 
   filterList `UI.onKeyPressed` \_ key _ ->
@@ -300,13 +333,13 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
     UI.focus messageList
 
   refreshMessages
-  return (ui, messageList, filterList, refreshMessages, addMessages, columnsEdit)
+  return (ui, messageList, filterList, pinnedList, refreshMessages, addMessages, columnsEdit)
 
 addMessagesToUI :: Filters -> [T.Text] -> _Widget -> Messages -> CurrentlyFollowing -> IO ()
 addMessagesToUI filters columns messageList newMessages currentlyFollowing = do
   let filteredMessages = toList $ filterMessages newMessages filters
   messageWidgets <- mapM (UI.plainText . formatMessage columns) filteredMessages
-  let messageItems = zip filteredMessages messageWidgets
+  let messageItems = zip (repeat ()) messageWidgets
   UI.addMultipleToList messageList messageItems
   when currentlyFollowing $ UI.scrollToEnd messageList
 
@@ -500,8 +533,8 @@ getSettingsFilePath =
 
 writeSettingsFile :: FilePath -> Filters -> [T.Text] -> IO ()
 writeSettingsFile fp filters columns = do
-  let jsonBytes = encodePretty $ Aeson.object ["filters" Aeson..= filters,
-                                               "columns" Aeson..= columns]
+  let jsonBytes = encodePretty $ Aeson.object ["filters" .= filters,
+                                               "columns" .= columns]
   createDirectoryIfMissing True $ fst $ splitFileName fp
   BSL.writeFile fp jsonBytes
 
@@ -510,8 +543,8 @@ parseSettings bytes =
   let columnsAndFilters = do -- maybe monad
         result <- Aeson.decode bytes
         flip Aeson.Types.parseMaybe result $ \obj -> do -- parser monad
-          columns <- obj Aeson..: "columns"
-          filters <- obj Aeson..: "filters"
+          columns <- obj .: "columns"
+          filters <- obj .: "filters"
           return (filters, columns)
   in
    fromMaybe ([], []) columnsAndFilters
@@ -632,6 +665,7 @@ startApp = do
   (ui,
    messageList,
    filterList,
+   pinnedList,
    refreshMessages,
    addMessages,
    columnsEdit) <- makeMainWindow messagesRef filtersRef followingRef columnsRef
@@ -644,6 +678,7 @@ startApp = do
   _ <- UI.addToFocusGroup mainFg messageList
   _ <- UI.addToFocusGroup mainFg filterList
   _ <- UI.addToFocusGroup mainFg columnsEdit
+  _ <- UI.addToFocusGroup mainFg pinnedList
   c <- UI.newCollection
   switchToMain <- UI.addToCollection c ui mainFg
 
@@ -666,6 +701,11 @@ startApp = do
 
   (saveSettingsWidget, saveSettingsFg) <- makeSaveSettingsDialog filtersRef columnsRef switchToMain
   switchToSaveSettingsDialog <- UI.addToCollection c saveSettingsWidget saveSettingsFg
+
+  mainFg `UI.onKeyPressed` \_ key _ ->
+    case key of
+     Events.KEsc -> exitSuccess
+     _ -> return False
 
   -- vty-ui, bafflingly, calls event handlers going from *outermost* first to
   -- the innermost widget last. So if we bind things on mainFg, they will
@@ -693,21 +733,20 @@ startApp = do
           return True
         _ -> return False
 
-  mainFg `UI.onKeyPressed` \_ key _ ->
-    case key of
-     Events.KEsc -> exitSuccess
-     _ -> return False
-
   messageList `UI.onKeyPressed` bindGlobalThings
   filterList `UI.onKeyPressed` bindGlobalThings
+  pinnedList `UI.onKeyPressed` bindGlobalThings
 
-  messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ message _) -> do
-    let pretty = decodeUtf8 $ BSL.toStrict $ encodePretty message
+  messageList `UI.onItemActivated` \(UI.ActivateItemEvent index _ _) -> do
+    messages <- readIORef messagesRef
+    let message = snd $ messages `Seq.index` index
+        pretty = decodeUtf8 $ BSL.toStrict $ encodePretty message
     UI.setText mdBody pretty
     switchToMessageDetail
 
   filterList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
   messageList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
+  pinnedList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
 
   filterList `UI.onItemActivated` \(UI.ActivateItemEvent index filt _) -> do
     editFilter index filt

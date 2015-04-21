@@ -13,7 +13,7 @@ module Main where
 import           Control.Concurrent        (forkIO)
 import           Control.Exception         (tryJust)
 import           Control.Monad             (forM_, forever, guard, liftM, mzero,
-                                            when)
+                                            when, void)
 import qualified Data.Aeson                as Aeson
 import           Data.Aeson.Encode.Pretty  (encodePretty)
 import qualified Data.Aeson.Types          as Aeson.Types
@@ -77,6 +77,7 @@ instance Aeson.FromJSON JSONPredicate where
     [Aeson.String "MatchesRegex", Aeson.String text] -> pure $ MatchesRegex text
     [Aeson.String "HasSubstring", Aeson.String text] -> pure $ HasSubstring text
     [Aeson.String "HasKey", Aeson.String text] -> pure $ HasKey text
+    _ -> mzero
   parseJSON _ = mzero
 
 instance Aeson.ToJSON LogFilter where
@@ -233,9 +234,6 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
   columnsEdit <- UI.editWidget
   columnEditor <- UI.hBox columnsLabel columnsEdit
 
-  messagesAndHeader <- return messageHeader
-                       <-->
-                       return borderedMessages
   rightArea <- return columnEditor
                <-->
                return messageHeader
@@ -279,6 +277,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
            let newFilt = filt {filterIsActive=IsActive $ not $ unIsActive $ filterIsActive filt}
            modifyIORef filtersRef $ replaceAtIndex index newFilt
            refreshMessages
+         Nothing -> error "No message is selected but this should be impossible"
 
   messageList `UI.onKeyPressed` \_ key _ ->
     case key of
@@ -356,7 +355,7 @@ makeFilterDialog dialogName switchToMain = do
   let returnKeyMeansNext = [nameEdit, jsonPathEdit, operandEdit]
   forM_ returnKeyMeansNext (`UI.onActivate` (\_ -> UI.focusNext filterFg))
 
-  let addFocus = UI.addToFocusGroup filterFg
+  let addFocus = void . UI.addToFocusGroup filterFg
   addFocus nameEdit
   addFocus jsonPathEdit
   addFocus equalsCheck
@@ -421,9 +420,10 @@ makeFilterEditWindow filtersRef refreshMessages switchToMain = do
          (Equals jsonVal) -> do
            UI.setCheckboxChecked (equalsCheck dialogRec)
            case jsonVal of
-            Aeson.String jsonText -> -- only supporting texts here for now
+            Aeson.String jsonText ->
               UI.setEditText (operandEdit dialogRec) jsonText
-         -- (MatchesRegex text) -> do return () -- TODO!
+            _ -> error "Only text is supported for json equality for now."
+         (MatchesRegex _) -> error "MatchesRegex is not yet supported."
          (HasSubstring text) -> do
            UI.setCheckboxChecked (substringCheck dialogRec)
            UI.setEditText (operandEdit dialogRec) text
@@ -638,12 +638,12 @@ startApp = do
 
   handle <- fdToHandle $ Fd 3 -- I'm not sure if there's a reason to support
                               -- FDs other than 3?
-  forkIO $ streamLines handle $ LinesCallback (UI.schedule . linesReceived addMessages)
+  _ <- forkIO $ streamLines handle $ LinesCallback (UI.schedule . linesReceived addMessages)
 
   mainFg <- UI.newFocusGroup
-  UI.addToFocusGroup mainFg messageList
-  UI.addToFocusGroup mainFg filterList
-  UI.addToFocusGroup mainFg columnsEdit
+  _ <- UI.addToFocusGroup mainFg messageList
+  _ <- UI.addToFocusGroup mainFg filterList
+  _ <- UI.addToFocusGroup mainFg columnsEdit
   c <- UI.newCollection
   switchToMain <- UI.addToCollection c ui mainFg
 
@@ -719,7 +719,7 @@ startApp = do
        selected <- UI.getSelected filterList
        case selected of
         Just (index, _) -> do
-          UI.removeFromList filterList index
+          _ <- UI.removeFromList filterList index
           modifyIORef filtersRef (removeIndex index)
           refreshMessages
           return True

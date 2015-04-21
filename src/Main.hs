@@ -211,6 +211,33 @@ headerText = "ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, \
              \P=Pin message, F=Create Filter, C=Change Columns, E=Follow end, \
              \Ctrl+s=Save settings"
 
+
+-- |Make a bordered list with header text and a "selected/total" label in the
+-- bottom border. TODO: this looks ugly because it's not rendering corners.
+-- This would be unnecessary if Bordered had a bottom label.
+makeCoolList :: Show b => Int -> T.Text -> IO (UI.Widget (UI.List a b),
+                                               UI.Widget _W)
+makeCoolList itemSize label = do
+  list <- UI.newList itemSize
+  topBorder <- UI.hBorder >>= UI.withHBorderLabel label
+  bottomBorder <- UI.hBorder >>= UI.withHBorderLabel "1/N"
+  bordered <- return topBorder
+              <-->
+              (UI.vBorder <++> return list <++> UI.vBorder)
+              <-->
+              return bottomBorder
+
+  list `UI.onSelectionChange` \event ->
+    case event of
+     (UI.SelectionOn index _ _) -> do
+       total <- UI.getListSize list
+       let txt = T.concat [T.pack $ show (index + 1), "/", T.pack $ show total]
+       UI.setHBorderLabel bottomBorder txt
+     _ -> return ()
+
+  list `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
+  return (list, bordered)
+
 makeMainWindow
   :: MessagesRef -> FiltersRef -> IORef Bool -> ColumnsRef
   -> IO (UI.Widget _W , -- ^ main widget
@@ -224,26 +251,16 @@ makeMainWindow
 makeMainWindow messagesRef filtersRef followingRef columnsRef = do
   mainHeader <- UI.plainText headerText
 
-  messageList <- UI.newList 1
-  borderedMessages <- UI.bordered messageList
-                      >>= UI.withBorderedLabel "Messages"
-
-  -- The pinnedList data is a tuple of the *messages* index and the json value.
-  pinnedList <- UI.newList 1 :: IO (UI.Widget (UI.List (Int, Aeson.Value) UI.FormattedText))
-  pinBorder <- UI.bordered pinnedList
-               >>= UI.withBorderedLabel "Pinned Messages"
-
-  filterList <- UI.newList 1
-  borderedFilters <- UI.bordered filterList
-                     >>= UI.withBorderedLabel "Filters"
-
+  (messageList, messagesWidget) <- makeCoolList 1 "Messages"
+  (pinnedList, pinBorder) <- makeCoolList 1 "Pinned Messages"
+  (filterList, borderedFilters) <- makeCoolList 1 "Filters"
   (columnsEdit, columnsField) <- makeEditField "Columns:"
 
   rightArea <- return columnsField
                <-->
                return pinBorder
                <-->
-               return borderedMessages
+               return messagesWidget
   let leftArea = borderedFilters
   body <- return leftArea <++> return rightArea
   UI.setBoxChildSizePolicy body $ UI.Percentage 15
@@ -282,7 +299,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
            let newFilt = filt {filterIsActive=IsActive $ not $ unIsActive $ filterIsActive filt}
            modifyIORef filtersRef $ replaceAtIndex index newFilt
            refreshMessages
-         Nothing -> error "No message is selected but this should be impossible"
+         Nothing -> return ()
 
   messageList `UI.onKeyPressed` \_ key _ ->
     case key of
@@ -315,7 +332,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
                                              return ()
                       Nothing -> error "Couldn't find pinned list item but pinned was true, this shouldn't happen."
            return True
-         Nothing -> error "No messages is selected but this should be impossible"
+         Nothing -> return True
       _ -> return False
 
   filterList `UI.onKeyPressed` \_ key _ ->
@@ -743,10 +760,6 @@ startApp = do
         pretty = decodeUtf8 $ BSL.toStrict $ encodePretty message
     UI.setText mdBody pretty
     switchToMessageDetail
-
-  filterList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
-  messageList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
-  pinnedList `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
 
   filterList `UI.onItemActivated` \(UI.ActivateItemEvent index filt _) -> do
     editFilter index filt

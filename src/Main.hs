@@ -373,7 +373,6 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
        return True
      _ -> return False
 
-
   filterList `UI.onKeyPressed` \_ key _ ->
     case key of
       Events.KHome -> UI.scrollToBeginning filterList >> return True
@@ -793,12 +792,18 @@ startApp = do
   filterList `UI.onKeyPressed` bindGlobalThings
   pinnedList `UI.onKeyPressed` bindGlobalThings
 
+
+  let viewDetails msg = do
+        let pretty = decodeUtf8 $ BSL.toStrict $ encodePretty msg
+        UI.setText mdBody pretty
+        switchToMessageDetail
+
+  pinnedList `UI.onItemActivated` \(UI.ActivateItemEvent _ (_, message) _) ->
+    viewDetails message
+
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent index _ _) -> do
     messages <- readIORef messagesRef
-    let message = snd $ messages `Seq.index` index
-        pretty = decodeUtf8 $ BSL.toStrict $ encodePretty message
-    UI.setText mdBody pretty
-    switchToMessageDetail
+    viewDetails $ snd $ messages `Seq.index` index
 
   filterList `UI.onItemActivated` \(UI.ActivateItemEvent index filt _) -> do
     editFilter index filt

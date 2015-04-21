@@ -31,6 +31,7 @@ import           Data.Text.Encoding        (decodeUtf8)
 import qualified Data.Vector               as V
 import qualified Graphics.Vty.Attributes   as Attrs
 import qualified Graphics.Vty.Input.Events as Events
+import           Graphics.Vty.Widgets.All  ((<++>), (<-->))
 import qualified Graphics.Vty.Widgets.All  as UI
 import           System.Directory          (createDirectoryIfMissing,
                                             getHomeDirectory)
@@ -81,7 +82,7 @@ instance Aeson.FromJSON JSONPredicate where
 instance Aeson.ToJSON LogFilter where
   toJSON (LogFilter {..}) = Aeson.object [
     "name" Aeson..= filterName
-    , "is_active" Aeson..= filterIsActive
+    , "is_active" Aeson..= unIsActive filterIsActive
     , "path" Aeson..= Parser.toString jsonPath
     , "predicate" Aeson..= Aeson.toJSON jsonPredicate]
 
@@ -95,7 +96,8 @@ instance Aeson.FromJSON LogFilter where
     isActive <- o Aeson..: "is_active"
     let parsed = Parser.getPath pathText
     case parsed of
-     Right path -> return LogFilter {filterName=name, filterIsActive=isActive,
+     Right path -> return LogFilter {filterName=name,
+                                     filterIsActive=IsActive isActive,
                                      jsonPredicate=predicate, jsonPath=path}
      Left e -> fail ("Error when parsing jsonPath: " ++ show e)
   parseJSON _ = mzero
@@ -117,13 +119,13 @@ filterMessages :: Seq.Seq (IsPinned, Aeson.Value) -> [LogFilter] -> Seq.Seq Aeso
 filterMessages messages filters = snd <$> Seq.filter filt messages
   where filt :: (IsPinned, Aeson.Value) -> Bool
         filt (pinned, json) = unIsPinned pinned || all (`matchFilter` json) activeFilters
-        activeFilters = filter filterIsActive filters
+        activeFilters = filter (unIsActive . filterIsActive) filters
 
 
 -- purely informative type synonyms
 newtype IsPinned = IsPinned { unIsPinned :: Bool } deriving Show
 newtype LinesCallback = LinesCallback { unLinesCallback :: [BS.ByteString] -> IO () }
-type IsActive = Bool
+newtype IsActive = IsActive {unIsActive :: Bool } deriving Show
 type FilterName = T.Text
 type Filters = [LogFilter]
 type Messages = Seq.Seq (IsPinned, Aeson.Value)
@@ -231,19 +233,27 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
   columnsEdit <- UI.editWidget
   columnEditor <- UI.hBox columnsLabel columnsEdit
 
-  messagesAndHeader <- UI.vBox messageHeader borderedMessages
-  rightArea <- UI.vBox columnEditor messagesAndHeader
-  leftArea <- UI.vBox filterHeader borderedFilters
-  hb <- UI.hBox leftArea rightArea
-  UI.setBoxChildSizePolicy hb $ UI.Percentage 15
-  headerAndBody <- UI.vBox borderedMainHeader hb
+  messagesAndHeader <- return messageHeader
+                       <-->
+                       return borderedMessages
+  rightArea <- return columnEditor
+               <-->
+               return messageHeader
+               <-->
+               return borderedMessages
+  leftArea <- return filterHeader
+              <-->
+              return borderedFilters
+  body <- return leftArea <++> return rightArea
+  UI.setBoxChildSizePolicy body $ UI.Percentage 15
+  headerAndBody <- UI.vBox borderedMainHeader body
   ui <- UI.centered headerAndBody
 
   let refreshMessages = do
         messages <- readIORef messagesRef
         filters <- readIORef filtersRef
         -- update filters list
-        let renderFilter filt = if filterIsActive filt
+        let renderFilter filt = if unIsActive $ filterIsActive filt
                                 then T.append "* " $ filterName filt
                                 else T.append "- " $ filterName filt
         filterWidgets <- mapM (UI.plainText . renderFilter) filters
@@ -266,7 +276,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
         selection <- UI.getSelected filterList
         case selection of
          Just (index, (filt, _)) -> do
-           let newFilt = filt {filterIsActive=not (filterIsActive filt)}
+           let newFilt = filt {filterIsActive=IsActive $ not $ unIsActive $ filterIsActive filt}
            modifyIORef filtersRef $ replaceAtIndex index newFilt
            refreshMessages
 
@@ -458,7 +468,7 @@ filterFromDialog dialogRec = do
        let filt = LogFilter {filterName=nameText,
                              jsonPath=path,
                              jsonPredicate=predicate,
-                             filterIsActive=True}
+                             filterIsActive=IsActive True}
        return $ Just filt
      Left _ -> return Nothing
 

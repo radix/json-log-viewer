@@ -241,7 +241,7 @@ makeCoolList :: Show b => Int -> T.Text -> IO (UI.Widget (UI.List a b),
 makeCoolList itemSize label = do
   list <- UI.newList itemSize
   topBorder <- UI.hBorder >>= UI.withHBorderLabel label
-  bottomBorder <- UI.hBorder >>= UI.withHBorderLabel "1/N"
+  bottomBorder <- UI.hBorder >>= UI.withHBorderLabel "0/0"
   bordered <- return topBorder
               <-->
               (UI.vBorder <++> return list <++> UI.vBorder)

@@ -29,9 +29,14 @@ executable json-log-viewer
   -- other-modules:       
   
   -- LANGUAGE extensions used by modules in this package.
-  other-extensions: OverloadedStrings
+  other-extensions: NamedFieldPuns
+                  , NamedWildCards
                   , NoMonomorphismRestriction
+                  , OverloadedStrings
+                  , PartialTypeSignatures
                   , PatternGuards
+                  , RecordWildCards
+                  , TupleSections
   
   -- Other library packages from which modules are imported.
   build-depends:       base >=4.8 && <4.9

@@ -248,14 +248,17 @@ makeCoolList itemSize label = do
               <-->
               return bottomBorder
 
-  list `UI.onSelectionChange` \event ->
-    case event of
-     (UI.SelectionOn index _ _) -> do
-       total <- UI.getListSize list
-       let txt = T.concat [T.pack $ show (index + 1), "/", T.pack $ show total]
-       UI.setHBorderLabel bottomBorder txt
-     _ -> return ()
+  let updateBottomLabel = do
+        total <- UI.getListSize list
+        selection <- UI.getSelected list
+        let index = case selection of
+              Just (idx, _) -> idx
+              Nothing -> 0
+        let txt = T.concat [T.pack $ show (index + 1), "/", T.pack $ show total]
+        UI.setHBorderLabel bottomBorder txt
 
+  list `UI.onSelectionChange` \_ -> updateBottomLabel
+  list `UI.onItemAdded` \_ -> updateBottomLabel
   list `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
   return (list, bordered)
 
@@ -782,8 +785,9 @@ startApp = do
           switchToFilterCreation
           return True
         (Events.KChar 'e', []) -> do
+          isFollowing <- readIORef followingRef
+          when (not isFollowing) $ UI.scrollToEnd messageList
           modifyIORef followingRef not
-          UI.scrollToEnd messageList
           return True
         (Events.KChar 'j', []) -> do
           UI.scrollDown messageList

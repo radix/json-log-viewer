@@ -20,7 +20,7 @@ module Main where
 -- 3. All the UI setup code is pointlessly in the IO monad. It seems so much
 --    better to me (a Haskell newbie, so take that with a grain of salt) that
 --    only runUi, various "set" functions, and event handlers should return IO,
---    and there should be some applicative API for constructing trees of
+--    and there should be some pure API for constructing trees of
 --    widgets.
 -- 4. (I'm not so sure on this one) Widget types depend on their contents. I
 --    like the idea of strongly typing as much as possible, but it's annoyed me
@@ -29,6 +29,10 @@ module Main where
 --    widgets.
 -- 5. There's no show/hide mechanism in vty-ui, and the "Group" widget will
 --    only allow replacing a widget with the *same type* of widget (see #4).
+
+
+-- Doing List as a view/model thing will be kind of tricky. For my use case it
+-- would require the ability to indicate list items to show/hide.
 
 
 import           Control.Concurrent        (forkIO)
@@ -47,6 +51,7 @@ import qualified Data.HashMap.Strict       as HM
 import           Data.IORef                (IORef, modifyIORef, newIORef,
                                             readIORef, writeIORef)
 import           Data.Maybe                (fromMaybe, mapMaybe)
+import           Data.Sequence             ((><))
 import qualified Data.Sequence             as Seq
 import qualified Data.Text                 as T
 import           Data.Text.Encoding        (decodeUtf8)
@@ -138,12 +143,12 @@ matchFilter (LogFilter {jsonPath, jsonPredicate}) aesonValue
     = jsonPredicate `matchPredicate` gotValue
 matchFilter _ _ = False
 
-filterMessages :: Seq.Seq (IsPinned, Aeson.Value) -> [LogFilter] -> Seq.Seq Aeson.Value
-filterMessages messages filters = snd <$> Seq.filter filt messages
-  where filt :: (IsPinned, Aeson.Value) -> Bool
-        filt (pinned, json) = unIsPinned pinned || all (`matchFilter` json) activeFilters
-        activeFilters = filter (unIsActive . filterIsActive) filters
 
+-- |Return True if the message should be shown in the UI (if it's pinned or
+-- matches filters)
+shouldShowMessage :: [LogFilter] -> (IsPinned, Aeson.Value) -> Bool
+shouldShowMessage filters (pinned, json) = unIsPinned pinned || all (`matchFilter` json) activeFilters
+  where activeFilters = filter (unIsActive . filterIsActive) filters
 
 -- purely informative type synonyms
 newtype IsPinned = IsPinned { unIsPinned :: Bool } deriving Show
@@ -154,10 +159,17 @@ type Filters = [LogFilter]
 type Message = (IsPinned, Aeson.Value)
 type Messages = Seq.Seq Message
 type MessagesRef = IORef Messages
+type PinnedListEntry = (Int, Aeson.Value) -- ^ The Int is an index into the
+                                          -- Messages sequence.
 type FiltersRef = IORef Filters
 type ColumnsRef = IORef [T.Text]
 type CurrentlyFollowing = Bool
 type FiltersIndex = Int -- ^ Index into the FiltersRef sequence
+
+-- Widgets
+type MessageListWidget = UI.Widget (UI.List Int UI.FormattedText)
+type FilterListWidget = UI.Widget (UI.List LogFilter UI.FormattedText)
+type PinnedListWidget = UI.Widget (UI.List PinnedListEntry UI.FormattedText)
 
 -- super general utilities
 
@@ -226,12 +238,10 @@ makeEditField labelText = do
   field <- makeField labelText edit
   return (edit, field)
 
-
 headerText :: T.Text
 headerText = "ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, \
              \P=Pin message, F=Create Filter, C=Change Columns, E=Follow end, \
              \Ctrl+s=Save settings"
-
 
 -- |Make a bordered list with header text and a "selected/total" label in the
 -- bottom border. TODO: this looks ugly because it's not rendering corners.
@@ -265,9 +275,9 @@ makeCoolList itemSize label = do
 makeMainWindow
   :: MessagesRef -> FiltersRef -> IORef Bool -> ColumnsRef
   -> IO (UI.Widget _W , -- ^ main widget
-         UI.Widget (UI.List () UI.FormattedText), -- ^ message list
-         UI.Widget (UI.List LogFilter UI.FormattedText), -- ^ filter list
-         UI.Widget (UI.List (Int, Aeson.Value) UI.FormattedText), -- ^ pinned list
+         MessageListWidget,
+         FilterListWidget,
+         PinnedListWidget,
          IO (), -- ^ refreshMessages
          Seq.Seq (IsPinned, Aeson.Types.Value) -> IO (), -- ^ addmessage
          UI.Widget UI.Edit -- ^ column edit widget
@@ -309,7 +319,7 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
         currentlyFollowing <- readIORef followingRef
         columns <- readIORef columnsRef
         UI.setEditText columnsEdit $ T.intercalate ", " columns
-        addMessagesToUI filters columns messageList messages currentlyFollowing
+        addMessagesToUI 0 filters columns messageList messages currentlyFollowing
         -- update pinned messages (in case columns changed)
         pinnedSize <- UI.getListSize pinnedList
         let rerenderPinned index = do
@@ -319,11 +329,13 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
                Nothing -> error "could't find pinned item when going through what should be all of its valid indices"
         mapM_ rerenderPinned [0..pinnedSize - 1]
       addMessages newMessages = do
-        modifyIORef messagesRef (Seq.>< newMessages)
+        messages <- readIORef messagesRef
+        let oldLength = Seq.length messages
+        writeIORef messagesRef (messages >< newMessages)
         filters <- readIORef filtersRef
         currentlyFollowing <- readIORef followingRef
         columns <- readIORef columnsRef
-        addMessagesToUI filters columns messageList newMessages currentlyFollowing
+        addMessagesToUI oldLength filters columns messageList newMessages currentlyFollowing
       toggleSelectedFilterActive = do
         selection <- UI.getSelected filterList
         case selection of
@@ -360,7 +372,9 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
       (Events.KChar 'p') -> do
         selection <- UI.getSelected messageList
         case selection of
-         Just (index, (_, _)) -> do
+         Just (_, (index, _)) -> do
+           -- Note that this index is the ListItem value, not the index into
+           -- the UI.List.
            messages <- readIORef messagesRef
            let message = messages `Seq.index` index
                isPinned = unIsPinned $ fst message
@@ -401,11 +415,17 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
   refreshMessages
   return (ui, messageList, filterList, pinnedList, refreshMessages, addMessages, columnsEdit)
 
-addMessagesToUI :: Filters -> [T.Text] -> _Widget -> Messages -> CurrentlyFollowing -> IO ()
-addMessagesToUI filters columns messageList newMessages currentlyFollowing = do
-  let filteredMessages = toList $ filterMessages newMessages filters
-  messageWidgets <- mapM (UI.plainText . formatMessage columns) filteredMessages
-  let messageItems = zip (repeat ()) messageWidgets
+addMessagesToUI :: Int -> Filters -> [T.Text] -> MessageListWidget -> Messages -> CurrentlyFollowing -> IO ()
+addMessagesToUI oldLength filters columns messageList newMessages currentlyFollowing = do
+  let theRange = [oldLength..]
+      -- Decorate the new messages with their *index into the messages model*,
+      -- so that after we filter them we can remember their index as the
+      -- model-value of each list item.
+      newMessages' = toList newMessages
+      decorated = zip theRange newMessages'
+      filteredMessagesWithIndices = filter (shouldShowMessage filters . snd) decorated
+  messageWidgets <- mapM (UI.plainText . formatMessage columns) (map (snd.snd) filteredMessagesWithIndices)
+  let messageItems = zip (map fst filteredMessagesWithIndices) messageWidgets
   UI.addMultipleToList messageList messageItems
   when currentlyFollowing $ UI.scrollToEnd messageList
 
@@ -813,7 +833,9 @@ startApp = do
   pinnedList `UI.onItemActivated` \(UI.ActivateItemEvent _ (_, message) _) ->
     viewDetails message
 
-  messageList `UI.onItemActivated` \(UI.ActivateItemEvent index _ _) -> do
+  messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ index _) -> do
+    -- Note that this `index` is the UI.List "value", not the index into the
+    -- List view.
     messages <- readIORef messagesRef
     viewDetails $ snd $ messages `Seq.index` index
 

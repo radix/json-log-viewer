@@ -22,7 +22,7 @@ This will load up a log file and continue streaming new messages:
 json-log-viewer 3< <(tail -n+0 -F somelog.log)
 ```
 
-I'm still working out a reliable way to involve an `ssh` into that second
+I'm still working out a reliable way to involve `ssh` in that second
 example. If anyone else can make it work reliably, please let me know.
 
 ## TODO

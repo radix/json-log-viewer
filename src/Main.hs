@@ -186,12 +186,13 @@ headerText = "ESC=Exit, TAB=Switch section, D=Delete filter, \
              \Ctrl+s=Save settings"
 
 formatFilterForList :: LogFilter -> T.Text
-formatFilterForList filt = T.append (if unIsActive $ filterIsActive filt
-                                        then "* "
-                                        else "- ")
-                                    (filterName filt)
+formatFilterForList filt = T.append bullet (filterName filt)
+  where bullet = (if unIsActive $ filterIsActive filt then "* " else "- ")
 
 
+-- |The second-worst function in town.
+-- Re-render everything from scratch: the filters, the messages, the pinned
+-- list, the columns edit field.
 refreshMessagesUI
    :: MessagesRef
    -> FiltersRef
@@ -226,13 +227,23 @@ refreshMessagesUI messagesRef filtersRef followingRef columnsRef filterList mess
     mapM_ rerenderPinned [0..pinnedSize - 1]
 
 
+-- |The worst function in town.
+-- Builds all the main widgets and returns them, plus a bunch of
+-- functions/actions for interacting with them.  Because there are circular
+-- dependencies between various things (like, the main window needs to be able
+-- to trigger a filter-editing dialog, and the filter-editing dialog needs to
+-- be able to refresh messages), we have to return a lot of our guts: the
+-- widgets that must have keys bound to switch those views. The reason for this
+-- is that we haven't set up the filter-editing dialog by the time this
+-- function gets called. We could swap the order, but then we would still have
+-- the same problem, just in a different order.
 makeMainWindow
   :: UI.Collection -> MessagesRef -> FiltersRef -> IORef Bool -> ColumnsRef
   -> IO (MessageListWidget,
          FilterListWidget,
          PinnedListWidget,
          IO (), -- ^ refreshMessages
-         Seq.Seq (IsPinned, Aeson.Value) -> IO (), -- ^ addmessage
+         Messages -> IO (), -- ^ addMessage
          IO () -- ^ switchToMain
         )
 makeMainWindow collection messagesRef filtersRef followingRef columnsRef = do
@@ -296,8 +307,6 @@ makeMainWindow collection messagesRef filtersRef followingRef columnsRef = do
 
   messageList `UI.onKeyPressed` \_ key _ ->
     case key of
-      Events.KHome -> UI.scrollToBeginning messageList >> return True
-      Events.KEnd -> UI.scrollToEnd messageList >> return True
       (Events.KChar 'p') -> do
         selection <- UI.getSelected messageList
         case selection of
@@ -329,8 +338,6 @@ makeMainWindow collection messagesRef filtersRef followingRef columnsRef = do
 
   filterList `UI.onKeyPressed` \_ key _ ->
     case key of
-      Events.KHome -> UI.scrollToBeginning filterList >> return True
-      Events.KEnd -> UI.scrollToEnd filterList >> return True
       Events.KChar ' ' -> toggleSelectedFilterActive >> return True
       _ -> return False
 

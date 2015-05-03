@@ -62,6 +62,12 @@ makeCoolList itemSize label = do
     Events.KChar 'k' -> do
       UI.scrollUp list
       return True
+    Events.KHome -> do
+      UI.scrollToBeginning list
+      return True
+    Events.KEnd -> do
+      UI.scrollToEnd list
+      return True
     _ -> return False
 
   return (list, bordered)

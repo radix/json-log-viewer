@@ -223,16 +223,15 @@ refreshMessagesUI messagesRef filtersRef followingRef columnsRef filterList mess
 
 
 makeMainWindow
-  :: MessagesRef -> FiltersRef -> IORef Bool -> ColumnsRef
-  -> IO (UI.Widget _W , -- ^ main widget
-         MessageListWidget,
+  :: UI.Collection -> MessagesRef -> FiltersRef -> IORef Bool -> ColumnsRef
+  -> IO (MessageListWidget,
          FilterListWidget,
          PinnedListWidget,
          IO (), -- ^ refreshMessages
          Seq.Seq (IsPinned, Aeson.Value) -> IO (), -- ^ addmessage
-         UI.Widget UI.Edit -- ^ column edit widget
+         IO () -- ^ switchToMain
         )
-makeMainWindow messagesRef filtersRef followingRef columnsRef = do
+makeMainWindow collection messagesRef filtersRef followingRef columnsRef = do
   mainHeader <- UI.plainText headerText
 
   (messageList, messagesWidget) <- makeCoolList 1 "Messages"
@@ -338,8 +337,21 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
     refreshMessages
     UI.focus messageList
 
+  mainFg <- UI.newFocusGroup
+  _ <- UI.addToFocusGroup mainFg messageList
+  _ <- UI.addToFocusGroup mainFg filterList
+  _ <- UI.addToFocusGroup mainFg columnsEdit
+  _ <- UI.addToFocusGroup mainFg pinnedList
+  switchToMain <- UI.addToCollection collection ui mainFg
+
+  mainFg `UI.onKeyPressed` \_ key _ ->
+    case key of
+     Events.KEsc -> exitSuccess
+     _ -> return False
+
+
   refreshMessages
-  return (ui, messageList, filterList, pinnedList, refreshMessages, addMessages, columnsEdit)
+  return (messageList, filterList, pinnedList, refreshMessages, addMessages, switchToMain)
 
 addMessagesToUI :: Int -> Filters -> [T.Text] -> MessageListWidget -> Messages -> CurrentlyFollowing -> IO ()
 addMessagesToUI oldLength filters columns messageList newMessages currentlyFollowing = do
@@ -443,18 +455,12 @@ makeSaveSettingsDialog filtersRef columnsRef switchToMain = do
 
   return (dialogWidget, dialogFg)
 
--- |Handle lines that are coming in from our "tail" process.
-linesReceived
-  :: (Messages -> IO ()) -- ^ the addMessages function
-  -> [BS.ByteString] -- ^ the new line
-  -> IO ()
-linesReceived addMessages newLines = do
-  -- potential for race condition here I think!
-  -- hmm, or not, since this will be run in the vty-ui event loop.
+-- |Convert lines from our streaming process to Messages
+byteStringsToMessages :: [BS.ByteString] -> Messages
+byteStringsToMessages newLines =
   let decoder = Aeson.decode :: BSL.ByteString -> Maybe Aeson.Value
       newJsons = mapMaybe (decoder . BSL.fromStrict) newLines
-      newMessages = Seq.fromList $ map (IsPinned False,) newJsons
-  addMessages newMessages
+  in Seq.fromList $ map (IsPinned False,) newJsons
 
 usage :: String
 usage = " \n\
@@ -492,26 +498,19 @@ startApp = do
   writeIORef columnsRef columns
 
   -- UI stuff
+  c <- UI.newCollection
 
   -- main window
-  (ui,
-   messageList,
+  (messageList,
    filterList,
    pinnedList,
    refreshMessages,
    addMessages,
-   columnsEdit) <- makeMainWindow messagesRef filtersRef followingRef columnsRef
+   switchToMain) <- makeMainWindow c messagesRef filtersRef followingRef columnsRef
 
   handle <- fdToHandle $ Fd 3
-  _ <- forkIO $ streamLines handle $ LinesCallback (UI.schedule . linesReceived addMessages)
+  _ <- forkIO $ streamLines handle $ LinesCallback (UI.schedule . addMessages . byteStringsToMessages)
 
-  mainFg <- UI.newFocusGroup
-  _ <- UI.addToFocusGroup mainFg messageList
-  _ <- UI.addToFocusGroup mainFg filterList
-  _ <- UI.addToFocusGroup mainFg columnsEdit
-  _ <- UI.addToFocusGroup mainFg pinnedList
-  c <- UI.newCollection
-  switchToMain <- UI.addToCollection c ui mainFg
 
   -- message detail window
   (messageDetail, mdBody) <- makeMessageDetailWindow
@@ -533,10 +532,6 @@ startApp = do
   (saveSettingsWidget, saveSettingsFg) <- makeSaveSettingsDialog filtersRef columnsRef switchToMain
   switchToSaveSettingsDialog <- UI.addToCollection c saveSettingsWidget saveSettingsFg
 
-  mainFg `UI.onKeyPressed` \_ key _ ->
-    case key of
-     Events.KEsc -> exitSuccess
-     _ -> return False
 
   -- vty-ui, bafflingly, calls event handlers going from *outermost* first to
   -- the innermost widget last. So if we bind things on mainFg, they will

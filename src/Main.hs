@@ -36,7 +36,7 @@ module Main where
 import           Control.Concurrent        (forkIO)
 import           Control.Exception         (tryJust)
 import           Control.Monad             (forM_, forever, guard, liftM,
-                                            void, when)
+                                            void, unless, when)
 import           Data.Aeson                ((.:), (.=))
 import qualified Data.Aeson                as Aeson
 import           Data.Aeson.Encode.Pretty  (encodePretty)
@@ -194,8 +194,8 @@ makeCoolList itemSize label = do
         let txt = T.concat [T.pack $ show (index + 1), "/", T.pack $ show total]
         UI.setHBorderLabel bottomBorder txt
 
-  list `UI.onSelectionChange` \_ -> updateBottomLabel
-  list `UI.onItemAdded` \_ -> updateBottomLabel
+  list `UI.onSelectionChange` const updateBottomLabel
+  list `UI.onItemAdded` const updateBottomLabel
   list `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
   return (list, bordered)
 
@@ -351,7 +351,7 @@ addMessagesToUI oldLength filters columns messageList newMessages currentlyFollo
       newMessages' = toList newMessages
       decorated = zip theRange newMessages'
       filteredMessagesWithIndices = filter (shouldShowMessage filters . snd) decorated
-  messageWidgets <- mapM (UI.plainText . formatMessage columns) (map (snd.snd) filteredMessagesWithIndices)
+  messageWidgets <- mapM (UI.plainText . formatMessage columns . snd . snd) filteredMessagesWithIndices
   let messageItems = zip (map fst filteredMessagesWithIndices) messageWidgets
   UI.addMultipleToList messageList messageItems
   when currentlyFollowing $ UI.scrollToEnd messageList
@@ -732,7 +732,7 @@ startApp = do
           return True
         (Events.KChar 'e', []) -> do
           isFollowing <- readIORef followingRef
-          when (not isFollowing) $ UI.scrollToEnd messageList
+          unless isFollowing $ UI.scrollToEnd messageList
           modifyIORef followingRef not
           return True
         (Events.KChar 'j', []) -> do

@@ -47,7 +47,6 @@ import           Data.Sequence              ((><))
 import qualified Data.Sequence              as Seq
 import qualified Data.Text                  as T
 import           Data.Text.Encoding         (decodeUtf8)
-import qualified Graphics.Vty.Attributes    as Attrs
 import qualified Graphics.Vty.Input.Events  as Events
 import           Graphics.Vty.Widgets.All   ((<++>), (<-->))
 import qualified Graphics.Vty.Widgets.All   as UI
@@ -66,7 +65,7 @@ import           JsonLogViewer.Filtration   (IsActive (..), LogFilter (..),
 import           JsonLogViewer.Settings     (getSettingsFilePath,
                                              loadSettingsFile,
                                              writeSettingsFile)
-import           JsonLogViewer.UIUtils      (makeEditField)
+import           JsonLogViewer.UIUtils      (makeCoolList, makeEditField)
 
 -- purely informative type synonyms
 newtype IsPinned = IsPinned { unIsPinned :: Bool } deriving Show
@@ -142,35 +141,6 @@ headerText :: T.Text
 headerText = "ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, \
              \P=Pin message, F=Create Filter, C=Change Columns, E=Follow end, \
              \Ctrl+s=Save settings"
-
--- |Make a bordered list with header text and a "selected/total" label in the
--- bottom border. TODO: this looks ugly because it's not rendering corners.
--- This would be unnecessary if Bordered had a bottom label.
-makeCoolList :: Show b => Int -> T.Text -> IO (UI.Widget (UI.List a b),
-                                               UI.Widget _W)
-makeCoolList itemSize label = do
-  list <- UI.newList itemSize
-  topBorder <- UI.hBorder >>= UI.withHBorderLabel label
-  bottomBorder <- UI.hBorder >>= UI.withHBorderLabel "0/0"
-  bordered <- return topBorder
-              <-->
-              (UI.vBorder <++> return list <++> UI.vBorder)
-              <-->
-              return bottomBorder
-
-  let updateBottomLabel = do
-        total <- UI.getListSize list
-        selection <- UI.getSelected list
-        let index = case selection of
-              Just (idx, _) -> idx
-              Nothing -> 0
-        let txt = T.concat [T.pack $ show (index + 1), "/", T.pack $ show total]
-        UI.setHBorderLabel bottomBorder txt
-
-  list `UI.onSelectionChange` const updateBottomLabel
-  list `UI.onItemAdded` const updateBottomLabel
-  list `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
-  return (list, bordered)
 
 makeMainWindow
   :: MessagesRef -> FiltersRef -> IORef Bool -> ColumnsRef

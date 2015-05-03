@@ -1,18 +1,18 @@
-{-# LANGUAGE NamedFieldPuns            #-}
-{-# LANGUAGE RecordWildCards           #-}
-{-# LANGUAGE OverloadedStrings         #-}
+{-# LANGUAGE NamedFieldPuns    #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 
 module JsonLogViewer.Filtration where
 
-import           Data.Aeson                ((.:), (.=))
-import qualified Data.Aeson as Aeson
-import           Data.Aeson.Path           (JSONPath (..), followPath)
-import qualified Data.Text                 as T
-import qualified Data.Vector               as V
-import           Data.Foldable             (toList)
-import           Control.Monad             (mzero)
-import qualified Data.Aeson.Path.Parser    as Parser
-import qualified Data.HashMap.Strict       as HM
+import           Control.Monad          (mzero)
+import           Data.Aeson             ((.:), (.=))
+import qualified Data.Aeson             as Aeson
+import           Data.Aeson.Path        (JSONPath (..), followPath)
+import qualified Data.Aeson.Path.Parser as Parser
+import           Data.Foldable          (toList)
+import qualified Data.HashMap.Strict    as HM
+import qualified Data.Text              as T
+import qualified Data.Vector            as V
 
 
 

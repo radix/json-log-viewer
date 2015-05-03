@@ -34,13 +34,9 @@ module Main where
 
 
 import           Control.Concurrent        (forkIO)
-import           Control.Exception         (tryJust)
-import           Control.Monad             (forM_, forever, guard, liftM,
-                                            void, unless, when)
-import           Data.Aeson                ((.:), (.=))
+import           Control.Monad             (forM_, forever, unless, void, when)
 import qualified Data.Aeson                as Aeson
 import           Data.Aeson.Encode.Pretty  (encodePretty)
-import qualified Data.Aeson.Types          as Aeson.Types
 import qualified Data.ByteString           as BS
 import qualified Data.ByteString.Lazy      as BSL
 import           Data.Char                 (isSpace)
@@ -48,7 +44,7 @@ import           Data.Foldable             (toList)
 import qualified Data.HashMap.Strict       as HM
 import           Data.IORef                (IORef, modifyIORef, newIORef,
                                             readIORef, writeIORef)
-import           Data.Maybe                (fromMaybe, mapMaybe)
+import           Data.Maybe                (mapMaybe)
 import           Data.Sequence             ((><))
 import qualified Data.Sequence             as Seq
 import qualified Data.Text                 as T
@@ -57,19 +53,18 @@ import qualified Graphics.Vty.Attributes   as Attrs
 import qualified Graphics.Vty.Input.Events as Events
 import           Graphics.Vty.Widgets.All  ((<++>), (<-->))
 import qualified Graphics.Vty.Widgets.All  as UI
-import           System.Directory          (createDirectoryIfMissing,
-                                            getHomeDirectory)
 import           System.Environment        (getArgs)
 import           System.Exit               (exitSuccess)
-import           System.FilePath           (splitFileName, (</>))
 import           System.IO                 (BufferMode (LineBuffering), Handle,
                                             hIsSeekable, hReady, hSetBuffering)
-import           System.IO.Error           (isDoesNotExistError)
 import           System.Posix.IO           (fdToHandle)
 import           System.Posix.Types        (Fd (Fd))
 
 import qualified Data.Aeson.Path.Parser    as Parser
-import JsonLogViewer.Filtration (JSONPredicate(..), LogFilter(..), matchFilter, IsActive(..))
+import           JsonLogViewer.Filtration  (IsActive (..), JSONPredicate (..),
+                                            LogFilter (..), matchFilter)
+import           JsonLogViewer.Settings    (getSettingsFilePath,
+                                            loadSettingsFile, writeSettingsFile)
 
 
 -- purely informative type synonyms
@@ -206,7 +201,7 @@ makeMainWindow
          FilterListWidget,
          PinnedListWidget,
          IO (), -- ^ refreshMessages
-         Seq.Seq (IsPinned, Aeson.Types.Value) -> IO (), -- ^ addmessage
+         Seq.Seq (IsPinned, Aeson.Value) -> IO (), -- ^ addmessage
          UI.Widget UI.Edit -- ^ column edit widget
         )
 makeMainWindow messagesRef filtersRef followingRef columnsRef = do
@@ -536,38 +531,6 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
   return (UI.dialogWidget (filterDialog dialogRec),
           filterFg dialogRec,
           createFilter)
-
-getSettingsFilePath :: IO FilePath
-getSettingsFilePath =
-  getHomeDirectory `plus` (</> ".config"
-                          </> "json-log-viewer"
-                          </> "settings.json")
-  where plus l r = liftM r l
-
-writeSettingsFile :: FilePath -> Filters -> [T.Text] -> IO ()
-writeSettingsFile fp filters columns = do
-  let jsonBytes = encodePretty $ Aeson.object ["filters" .= filters,
-                                               "columns" .= columns]
-  createDirectoryIfMissing True $ fst $ splitFileName fp
-  BSL.writeFile fp jsonBytes
-
-parseSettings :: BSL.ByteString -> (Filters, [T.Text])
-parseSettings bytes =
-  let columnsAndFilters = do -- maybe monad
-        result <- Aeson.decode bytes
-        flip Aeson.Types.parseMaybe result $ \obj -> do -- parser monad
-          columns <- obj .: "columns"
-          filters <- obj .: "filters"
-          return (filters, columns)
-  in
-   fromMaybe ([], []) columnsAndFilters
-
-loadSettingsFile :: FilePath -> IO (Filters, [T.Text])
-loadSettingsFile fp = do
-  e <- tryJust (guard . isDoesNotExistError) (BSL.readFile fp)
-  case e of
-   Left _ -> return ([], [])
-   Right bytes -> return $ parseSettings bytes
 
 makeSaveSettingsDialog
   :: FiltersRef

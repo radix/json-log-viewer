@@ -1,5 +1,4 @@
 {-# LANGUAGE NamedWildCards        #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE PartialTypeSignatures     #-}
 
@@ -16,7 +15,8 @@ makeField labelText widget = do
   label <- UI.plainText labelText
   UI.hBox label widget
 
-makeEditField :: T.Text -> IO (UI.Widget UI.Edit, UI.Widget (UI.Box UI.FormattedText UI.Edit))
+makeEditField :: T.Text -> IO (UI.Widget UI.Edit,
+                               UI.Widget (UI.Box UI.FormattedText UI.Edit))
 makeEditField labelText = do
   edit <- UI.editWidget
   field <- makeField labelText edit

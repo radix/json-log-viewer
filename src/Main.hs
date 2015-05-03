@@ -78,6 +78,7 @@ type PinnedListEntry = (Int, Aeson.Value) -- ^ The Int is an index into the
 type FiltersRef = IORef Filters
 type ColumnsRef = IORef [T.Text]
 type CurrentlyFollowing = Bool
+type CurrentlyFollowingRef = IORef CurrentlyFollowing
 type FiltersIndex = Int -- ^ Index into the FiltersRef sequence
 
 -- Widgets
@@ -117,7 +118,7 @@ columnify columns message =
           case HM.lookup column hashmap of
            (Just (Aeson.String str)) ->
              if "\n" `T.isInfixOf` str -- the list widgets won't show anything
-                                     -- after a newline, so don't include them
+                                       -- after a newline, so don't include them
              then renderWithKey column (T.pack $ show str)
              else renderWithKey column str
            (Just (Aeson.Number num)) -> renderWithKey column $ T.pack $ show num
@@ -132,13 +133,94 @@ formatMessage columns message = if null columns
                                 then jsonToText message
                                 else columnify columns message
 
+
+{-
+
+Factoring ideas: Optimize for understanding the application.
+
+There are a number of "modes" that the application can be in:
+- messages view
+- message detail
+- filter creation
+- filter editing
+- saving settings
+The main screen needs to be able to switch to any of the other modes, and
+the other modes need to be able to switch back to the main screen.
+
+Another axis of important things is *actions that can be taken*:
+- view details of a message
+- create a filter
+- edit a filter
+- pin/unpin a message
+- process received messages
+- refilter all messages (this is a secondary effect of other things)
+
+So we could have a central AppState value, with the following functions, ideally:
+- viewSelectedMessageDetail appState -- Or should it be passed the message?
+- switchToMain appState
+- createFilter appState
+- editSelectedFilter appState -- Or should it be passed the filter?
+- saveSettings appState
+- pinSelectedMessage appState -- Or should it be passed the message?
+- unPinSelectedMessage appState -- Or should it be passed the message?
+- refreshMessages appState
+- addMessage appState message
+
+
+This is a pretty object-oriented design, where scopes are probably
+unnecessarily large. But then, scopes are already unnecessarily large in the
+current codebase, while having a completely unclear structure. So this would
+certainly be a win over the current state of affairs.
+
+-}
+
 -- UI code. It's groooooss.
 
-
 headerText :: T.Text
-headerText = "ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, \
+headerText = "ESC=Exit, TAB=Switch section, D=Delete filter, \
+             \SPC=Toggle Filter, RET=Open, \
              \P=Pin message, F=Create Filter, C=Change Columns, E=Follow end, \
              \Ctrl+s=Save settings"
+
+formatFilterForList :: LogFilter -> T.Text
+formatFilterForList filt = T.append (if unIsActive $ filterIsActive filt
+                                        then "* "
+                                        else "- ")
+                                    (filterName filt)
+
+refreshMessagesUI 
+   :: MessagesRef
+   -> FiltersRef
+   -> CurrentlyFollowingRef
+   -> ColumnsRef
+   -> FilterListWidget
+   -> MessageListWidget
+   -> PinnedListWidget
+   -> _W
+   -> IO ()
+refreshMessagesUI messagesRef filtersRef followingRef columnsRef filterList messageList pinnedList columnsEdit = do
+    messages <- readIORef messagesRef
+    filters <- readIORef filtersRef
+    -- update filters list
+    filterWidgets <- mapM (UI.plainText . formatFilterForList) filters
+    let filterItems = zip filters filterWidgets
+    UI.clearList filterList
+    UI.addMultipleToList filterList filterItems
+    -- update messages list
+    UI.clearList messageList
+    currentlyFollowing <- readIORef followingRef
+    columns <- readIORef columnsRef
+    UI.setEditText columnsEdit $ T.intercalate ", " columns
+    addMessagesToUI 0 filters columns messageList messages currentlyFollowing
+    -- update pinned messages (in case columns changed)
+    pinnedSize <- UI.getListSize pinnedList
+    let rerenderPinned index = do
+         mPinnedWidget <- UI.getListItem pinnedList index
+         case mPinnedWidget of
+          Just ((_, json), widget) -> UI.setText widget $ formatMessage columns json
+          Nothing -> error "could't find pinned item when going through what should be all of its valid indices"
+    mapM_ rerenderPinned [0..pinnedSize - 1]
+
 
 makeMainWindow
   :: MessagesRef -> FiltersRef -> IORef Bool -> ColumnsRef
@@ -158,44 +240,20 @@ makeMainWindow messagesRef filtersRef followingRef columnsRef = do
   (filterList, borderedFilters) <- makeCoolList 1 "Filters"
   (columnsEdit, columnsField) <- makeEditField "Columns:"
 
-  rightArea <- return columnsField
-               <-->
-               return pinBorder
-               <-->
-               return messagesWidget
-  let leftArea = borderedFilters
-  body <- return leftArea <++> return rightArea
-  UI.setBoxChildSizePolicy body $ UI.Percentage 15
+  top <- return borderedFilters <++> (return columnsField
+                                       <-->
+                                       return pinBorder)
+  UI.setBoxChildSizePolicy top $ UI.Percentage 20
+  body <- return top
+          <-->
+          return messagesWidget
+  UI.setBoxChildSizePolicy body $ UI.Percentage 30
   headerAndBody <- return mainHeader
                    <-->
                    return body
   ui <- UI.centered headerAndBody
 
-  let refreshMessages = do
-        messages <- readIORef messagesRef
-        filters <- readIORef filtersRef
-        -- update filters list
-        let renderFilter filt = if unIsActive $ filterIsActive filt
-                                then T.append "* " $ filterName filt
-                                else T.append "- " $ filterName filt
-        filterWidgets <- mapM (UI.plainText . renderFilter) filters
-        let filterItems = zip filters filterWidgets
-        UI.clearList filterList
-        UI.addMultipleToList filterList filterItems
-        -- update messages list
-        UI.clearList messageList
-        currentlyFollowing <- readIORef followingRef
-        columns <- readIORef columnsRef
-        UI.setEditText columnsEdit $ T.intercalate ", " columns
-        addMessagesToUI 0 filters columns messageList messages currentlyFollowing
-        -- update pinned messages (in case columns changed)
-        pinnedSize <- UI.getListSize pinnedList
-        let rerenderPinned index = do
-              mPinnedWidget <- UI.getListItem pinnedList index
-              case mPinnedWidget of
-               Just ((_, json), widget) -> UI.setText widget $ formatMessage columns json
-               Nothing -> error "could't find pinned item when going through what should be all of its valid indices"
-        mapM_ rerenderPinned [0..pinnedSize - 1]
+  let refreshMessages = do refreshMessagesUI messagesRef filtersRef followingRef columnsRef filterList messageList pinnedList columnsEdit
       addMessages newMessages = do
         messages <- readIORef messagesRef
         let oldLength = Seq.length messages
@@ -424,7 +482,7 @@ startApp = do
   -- mutable variablessss
   messagesRef <- newIORef Seq.empty :: IO MessagesRef
   filtersRef <- newIORef [] :: IO FiltersRef
-  followingRef <- newIORef False :: IO (IORef CurrentlyFollowing)
+  followingRef <- newIORef False :: IO CurrentlyFollowingRef
   columnsRef <- newIORef [] :: IO ColumnsRef
 
   -- load settings

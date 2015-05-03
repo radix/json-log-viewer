@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedWildCards        #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE PartialTypeSignatures     #-}
@@ -29,16 +30,7 @@ makeCoolList
   => Int
   -> T.Text
   -> IO (UI.Widget (UI.List a b),
-         -- PartialTypeSignatures has forsaken me. I don't know why I can't
-         -- specify the next type as _W.
-         UI.Widget (
-           UI.Box (
-             UI.Box UI.HBorder (
-               UI.Box (
-                 UI.Box UI.VBorder (
-                   UI.List a b))
-                 UI.VBorder))
-              UI.HBorder))
+         UI.Widget _W)
 makeCoolList itemSize label = do
   list <- UI.newList itemSize
   topBorder <- UI.hBorder >>= UI.withHBorderLabel label

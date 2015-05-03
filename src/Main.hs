@@ -3,8 +3,6 @@
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE PartialTypeSignatures     #-}
-{-# LANGUAGE PatternGuards             #-}
-{-# LANGUAGE RecordWildCards           #-}
 {-# LANGUAGE TupleSections             #-}
 
 module Main where
@@ -37,7 +35,7 @@ module Main where
 
 import           Control.Concurrent        (forkIO)
 import           Control.Exception         (tryJust)
-import           Control.Monad             (forM_, forever, guard, liftM, mzero,
+import           Control.Monad             (forM_, forever, guard, liftM,
                                             void, when)
 import           Data.Aeson                ((.:), (.=))
 import qualified Data.Aeson                as Aeson
@@ -55,7 +53,6 @@ import           Data.Sequence             ((><))
 import qualified Data.Sequence             as Seq
 import qualified Data.Text                 as T
 import           Data.Text.Encoding        (decodeUtf8)
-import qualified Data.Vector               as V
 import qualified Graphics.Vty.Attributes   as Attrs
 import qualified Graphics.Vty.Input.Events as Events
 import           Graphics.Vty.Widgets.All  ((<++>), (<-->))
@@ -71,89 +68,13 @@ import           System.IO.Error           (isDoesNotExistError)
 import           System.Posix.IO           (fdToHandle)
 import           System.Posix.Types        (Fd (Fd))
 
-import           Data.Aeson.Path           (JSONPath (..), followPath)
 import qualified Data.Aeson.Path.Parser    as Parser
+import JsonLogViewer.Filtration (JSONPredicate(..), LogFilter(..), matchFilter, IsActive(..))
 
--- FILTRATION
-
-data JSONPredicate
-  = Equals Aeson.Value
-  | MatchesRegex T.Text
-  | HasSubstring T.Text
-  | HasKey T.Text
-  deriving Show
-
-data LogFilter = LogFilter
-  { jsonPath       :: JSONPath
-  , jsonPredicate  :: JSONPredicate
-  , filterName     :: T.Text
-  , filterIsActive :: IsActive} deriving Show
-
-lArray :: [Aeson.Value] -> Aeson.Value
-lArray = Aeson.Array . V.fromList
-
-instance Aeson.ToJSON JSONPredicate where
-  toJSON (Equals jsonVal) = lArray [Aeson.String "Equals", jsonVal]
-  toJSON (MatchesRegex text) = lArray [Aeson.String "MatchesRegex", Aeson.String text]
-  toJSON (HasSubstring text) = lArray [Aeson.String "HasSubstring", Aeson.String text]
-  toJSON (HasKey text) = lArray [Aeson.String "HasKey", Aeson.String text]
-
-instance Aeson.FromJSON JSONPredicate where
-  parseJSON (Aeson.Array v) = case toList v of
-    [Aeson.String "Equals", val] -> pure $ Equals val
-    [Aeson.String "MatchesRegex", Aeson.String text] -> pure $ MatchesRegex text
-    [Aeson.String "HasSubstring", Aeson.String text] -> pure $ HasSubstring text
-    [Aeson.String "HasKey", Aeson.String text] -> pure $ HasKey text
-    _ -> mzero
-  parseJSON _ = mzero
-
-instance Aeson.ToJSON LogFilter where
-  toJSON (LogFilter {..}) = Aeson.object [
-    "name" .= filterName
-    , "is_active" .= unIsActive filterIsActive
-    , "path" .= Parser.toString jsonPath
-    , "predicate" .= Aeson.toJSON jsonPredicate]
-
-instance Aeson.FromJSON LogFilter where
-  parseJSON (Aeson.Object o) = do
-    -- I'd *like* to do this applicatively, but I'm not actually sure it's
-    -- possible at all, given the Either handling below.
-    name <- o .: "name"
-    predicate <- o .: "predicate"
-    pathText <- o .: "path"
-    isActive <- o .: "is_active"
-    let parsed = Parser.getPath pathText
-    case parsed of
-     Right path -> return LogFilter {filterName=name,
-                                     filterIsActive=IsActive isActive,
-                                     jsonPredicate=predicate, jsonPath=path}
-     Left e -> fail ("Error when parsing jsonPath: " ++ show e)
-  parseJSON _ = mzero
-
-matchPredicate :: JSONPredicate -> Aeson.Value -> Bool
-matchPredicate (Equals expected)       got = expected == got
-matchPredicate (HasSubstring expected) (Aeson.String got) = expected `T.isInfixOf` got
-matchPredicate (MatchesRegex _) _ = error "Implement MatchesRegex"
-matchPredicate (HasKey expected) (Aeson.Object hm) = HM.member expected hm
-matchPredicate _ _ = False
-
-matchFilter :: LogFilter -> Aeson.Value -> Bool
-matchFilter (LogFilter {jsonPath, jsonPredicate}) aesonValue
-  | Just gotValue <- followPath jsonPath aesonValue
-    = jsonPredicate `matchPredicate` gotValue
-matchFilter _ _ = False
-
-
--- |Return True if the message should be shown in the UI (if it's pinned or
--- matches filters)
-shouldShowMessage :: [LogFilter] -> (IsPinned, Aeson.Value) -> Bool
-shouldShowMessage filters (pinned, json) = unIsPinned pinned || all (`matchFilter` json) activeFilters
-  where activeFilters = filter (unIsActive . filterIsActive) filters
 
 -- purely informative type synonyms
 newtype IsPinned = IsPinned { unIsPinned :: Bool } deriving Show
 newtype LinesCallback = LinesCallback { unLinesCallback :: [BS.ByteString] -> IO () }
-newtype IsActive = IsActive {unIsActive :: Bool } deriving Show
 type FilterName = T.Text
 type Filters = [LogFilter]
 type Message = (IsPinned, Aeson.Value)
@@ -170,6 +91,12 @@ type FiltersIndex = Int -- ^ Index into the FiltersRef sequence
 type MessageListWidget = UI.Widget (UI.List Int UI.FormattedText)
 type FilterListWidget = UI.Widget (UI.List LogFilter UI.FormattedText)
 type PinnedListWidget = UI.Widget (UI.List PinnedListEntry UI.FormattedText)
+
+-- |Return True if the message should be shown in the UI (if it's pinned or
+-- matches filters)
+shouldShowMessage :: [LogFilter] -> (IsPinned, Aeson.Value) -> Bool
+shouldShowMessage filters (pinned, json) = unIsPinned pinned || all (`matchFilter` json) activeFilters
+  where activeFilters = filter (unIsActive . filterIsActive) filters
 
 -- super general utilities
 
@@ -717,10 +644,10 @@ usage = " \n\
 \\n\
 \Input must be JSON documents, one per line.\n\
 \\n\
-\This syntax works with bash and zsh. \n\
+\This syntax works with bash and zsh.\n\
 \\n\
-\fish supports file redirection but I haven't figured out the syntax for \n\
-\pipe redirection."
+\fish supports file redirection but I haven't figured out the syntax for\n\
+\subprocess redirection."
 
 main :: IO ()
 main = do
@@ -756,8 +683,7 @@ startApp = do
    addMessages,
    columnsEdit) <- makeMainWindow messagesRef filtersRef followingRef columnsRef
 
-  handle <- fdToHandle $ Fd 3 -- I'm not sure if there's a reason to support
-                              -- FDs other than 3?
+  handle <- fdToHandle $ Fd 3
   _ <- forkIO $ streamLines handle $ LinesCallback (UI.schedule . linesReceived addMessages)
 
   mainFg <- UI.newFocusGroup
@@ -820,10 +746,10 @@ startApp = do
           return True
         _ -> return False
 
+
   messageList `UI.onKeyPressed` bindGlobalThings
   filterList `UI.onKeyPressed` bindGlobalThings
   pinnedList `UI.onKeyPressed` bindGlobalThings
-
 
   let viewDetails msg = do
         let pretty = decodeUtf8 $ BSL.toStrict $ encodePretty msg

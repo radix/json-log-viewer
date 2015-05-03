@@ -1,9 +1,7 @@
-{-# LANGUAGE NamedFieldPuns            #-}
-{-# LANGUAGE NamedWildCards            #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
-{-# LANGUAGE OverloadedStrings         #-}
-{-# LANGUAGE PartialTypeSignatures     #-}
-{-# LANGUAGE TupleSections             #-}
+{-# LANGUAGE NamedWildCards        #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE TupleSections         #-}
 
 module Main where
 
@@ -33,39 +31,42 @@ module Main where
 -- would require the ability to indicate list items to show/hide.
 
 
-import           Control.Concurrent        (forkIO)
-import           Control.Monad             (forM_, forever, unless, void, when)
-import qualified Data.Aeson                as Aeson
-import           Data.Aeson.Encode.Pretty  (encodePretty)
-import qualified Data.ByteString           as BS
-import qualified Data.ByteString.Lazy      as BSL
-import           Data.Char                 (isSpace)
-import           Data.Foldable             (toList)
-import qualified Data.HashMap.Strict       as HM
-import           Data.IORef                (IORef, modifyIORef, newIORef,
-                                            readIORef, writeIORef)
-import           Data.Maybe                (mapMaybe)
-import           Data.Sequence             ((><))
-import qualified Data.Sequence             as Seq
-import qualified Data.Text                 as T
-import           Data.Text.Encoding        (decodeUtf8)
-import qualified Graphics.Vty.Attributes   as Attrs
-import qualified Graphics.Vty.Input.Events as Events
-import           Graphics.Vty.Widgets.All  ((<++>), (<-->))
-import qualified Graphics.Vty.Widgets.All  as UI
-import           System.Environment        (getArgs)
-import           System.Exit               (exitSuccess)
-import           System.IO                 (BufferMode (LineBuffering), Handle,
-                                            hIsSeekable, hReady, hSetBuffering)
-import           System.Posix.IO           (fdToHandle)
-import           System.Posix.Types        (Fd (Fd))
+import           Control.Concurrent         (forkIO)
+import           Control.Monad              (forever, unless, when)
+import qualified Data.Aeson                 as Aeson
+import           Data.Aeson.Encode.Pretty   (encodePretty)
+import qualified Data.ByteString            as BS
+import qualified Data.ByteString.Lazy       as BSL
+import           Data.Char                  (isSpace)
+import           Data.Foldable              (toList)
+import qualified Data.HashMap.Strict        as HM
+import           Data.IORef                 (IORef, modifyIORef, newIORef,
+                                             readIORef, writeIORef)
+import           Data.Maybe                 (mapMaybe)
+import           Data.Sequence              ((><))
+import qualified Data.Sequence              as Seq
+import qualified Data.Text                  as T
+import           Data.Text.Encoding         (decodeUtf8)
+import qualified Graphics.Vty.Attributes    as Attrs
+import qualified Graphics.Vty.Input.Events  as Events
+import           Graphics.Vty.Widgets.All   ((<++>), (<-->))
+import qualified Graphics.Vty.Widgets.All   as UI
+import           System.Environment         (getArgs)
+import           System.Exit                (exitSuccess)
+import           System.IO                  (BufferMode (LineBuffering), Handle,
+                                             hIsSeekable, hReady, hSetBuffering)
+import           System.Posix.IO            (fdToHandle)
+import           System.Posix.Types         (Fd (Fd))
 
-import qualified Data.Aeson.Path.Parser    as Parser
-import           JsonLogViewer.Filtration  (IsActive (..), JSONPredicate (..),
-                                            LogFilter (..), matchFilter)
-import           JsonLogViewer.Settings    (getSettingsFilePath,
-                                            loadSettingsFile, writeSettingsFile)
-
+import           JsonLogViewer.FilterDialog (blankFilterDialog,
+                                             filterFromDialog, makeFilterDialog,
+                                             setDefaultsFromFilter)
+import           JsonLogViewer.Filtration   (IsActive (..), LogFilter (..),
+                                             matchFilter)
+import           JsonLogViewer.Settings     (getSettingsFilePath,
+                                             loadSettingsFile,
+                                             writeSettingsFile)
+import           JsonLogViewer.UIUtils      (makeEditField)
 
 -- purely informative type synonyms
 newtype IsPinned = IsPinned { unIsPinned :: Bool } deriving Show
@@ -86,6 +87,7 @@ type FiltersIndex = Int -- ^ Index into the FiltersRef sequence
 type MessageListWidget = UI.Widget (UI.List Int UI.FormattedText)
 type FilterListWidget = UI.Widget (UI.List LogFilter UI.FormattedText)
 type PinnedListWidget = UI.Widget (UI.List PinnedListEntry UI.FormattedText)
+
 
 -- |Return True if the message should be shown in the UI (if it's pinned or
 -- matches filters)
@@ -135,30 +137,6 @@ formatMessage columns message = if null columns
 
 -- UI code. It's groooooss.
 
--- |A bag of junk useful for filter creation/editing UIs
-data FilterDialog = FilterDialog {
-  nameEdit             :: UI.Widget UI.Edit
-  , jsonPathEdit       :: UI.Widget UI.Edit
-  , operandEdit        :: UI.Widget UI.Edit
-  , operatorRadioGroup :: UI.RadioGroup
-  , equalsCheck        :: UI.Widget (UI.CheckBox Bool)
-  , substringCheck     :: UI.Widget (UI.CheckBox Bool)
-  , hasKeyCheck        :: UI.Widget (UI.CheckBox Bool)
-  , filterDialog       :: UI.Dialog
-  , filterFg           :: UI.Widget UI.FocusGroup
-  , setDefaults        :: IO ()
-  }
-
-makeField :: (Show a) => T.Text -> UI.Widget a -> IO (UI.Widget _W)
-makeField labelText widget = do
-  label <- UI.plainText labelText
-  UI.hBox label widget
-
-makeEditField :: T.Text -> IO (UI.Widget UI.Edit, UI.Widget _W)
-makeEditField labelText = do
-  edit <- UI.editWidget
-  field <- makeField labelText edit
-  return (edit, field)
 
 headerText :: T.Text
 headerText = "ESC=Exit, TAB=Switch section, D=Delete filter, RET=Open, \
@@ -359,84 +337,6 @@ makeMessageDetailWindow = do
   messageDetail <- UI.vBox mdHeader mdBody
   return (messageDetail, mdBody)
 
--- |Create a general filter UI.
-makeFilterDialog :: T.Text -> IO () -> IO FilterDialog
-makeFilterDialog dialogName switchToMain = do
-  (nameEdit, nameField) <- makeEditField "Filter Name:"
-  (jsonPathEdit, jsonPathField) <- makeEditField "JSON Path:"
-  parseStatusText <- UI.plainText "Please Enter a JSON Path."
-  parseStatusField <- makeField "Parse status:" parseStatusText
-
-  operatorLabel <- UI.plainText "Operator:"
-  operatorRadioGroup <- UI.newRadioGroup
-  equalsCheck <- UI.newCheckbox "Equals"
-  substringCheck <- UI.newCheckbox "Has Substring"
-  hasKeyCheck <- UI.newCheckbox "Has Key"
-  UI.addToRadioGroup operatorRadioGroup equalsCheck
-  UI.addToRadioGroup operatorRadioGroup substringCheck
-  UI.addToRadioGroup operatorRadioGroup hasKeyCheck
-
-  UI.setCheckboxChecked substringCheck
-  operatorRadioChecks'' <- UI.hBox substringCheck hasKeyCheck
-  operatorRadioChecks' <- UI.hBox equalsCheck operatorRadioChecks''
-  operatorRadioChecks <- UI.hBox operatorLabel operatorRadioChecks'
-
-  (operandEdit, operandField) <- makeEditField "Operand:"
-
-  dialogBody <- UI.newTable [UI.column UI.ColAuto] UI.BorderNone
-  let addRow = UI.addRow dialogBody
-  addRow nameField
-  addRow jsonPathField
-  addRow parseStatusField
-  addRow operatorRadioChecks
-  addRow operandField
-
-  (filterDialog, filterFg) <- UI.newDialog dialogBody dialogName
-
-  let returnKeyMeansNext = [nameEdit, jsonPathEdit, operandEdit]
-  forM_ returnKeyMeansNext (`UI.onActivate` (\_ -> UI.focusNext filterFg))
-
-  let addFocus = void . UI.addToFocusGroup filterFg
-  addFocus nameEdit
-  addFocus jsonPathEdit
-  addFocus equalsCheck
-  addFocus substringCheck
-  addFocus hasKeyCheck
-  addFocus operandEdit
-
-  jsonPathEdit `UI.onChange` \text -> do
-    let path = Parser.getPath $ T.unpack text
-    case path of
-     (Left e) -> UI.setText parseStatusText $ T.pack $ show e
-     (Right _) -> UI.setText parseStatusText "Valid! :-)"
-
-  filterFg `UI.onKeyPressed` \_ key _ ->
-    case key of
-     Events.KEsc -> UI.cancelDialog filterDialog >> return True
-     _ -> return False
-
-  filterDialog `UI.onDialogCancel` const switchToMain
-
-  let setDefaults = do
-        UI.setEditText nameEdit ""
-        UI.setEditText jsonPathEdit ""
-        UI.setEditText operandEdit ""
-        UI.setCheckboxChecked substringCheck
-        UI.focus nameEdit
-
-  return FilterDialog {
-    nameEdit = nameEdit
-    , jsonPathEdit = jsonPathEdit
-    , equalsCheck = equalsCheck
-    , substringCheck = substringCheck
-    , hasKeyCheck = hasKeyCheck
-    , filterDialog = filterDialog
-    , filterFg = filterFg
-    , setDefaults = setDefaults
-    , operandEdit = operandEdit
-    , operatorRadioGroup = operatorRadioGroup}
-
-
 
 -- TODO radix: consider async + wait for getting the result of filter editing?
 
@@ -448,32 +348,16 @@ makeFilterEditWindow
         , UI.Widget UI.FocusGroup -- ^ the dialog's focus group
         , FiltersIndex -> LogFilter -> IO ()) -- ^ the editFilter function
 makeFilterEditWindow filtersRef refreshMessages switchToMain = do
-  dialogRec <- makeFilterDialog "Edit Filter" switchToMain
+  (dialogRec, filterDialog, filterFg) <- makeFilterDialog "Edit Filter" switchToMain
 
   -- YUCK
   filterIndexRef <- newIORef (Nothing :: Maybe FiltersIndex)
 
-  let editFilter index (LogFilter {jsonPath, jsonPredicate, filterName}) = do
-        UI.focus (nameEdit dialogRec)
-        UI.setEditText (nameEdit dialogRec) filterName
-        UI.setEditText (jsonPathEdit dialogRec) $ Parser.toString jsonPath
-        case jsonPredicate of
-         (Equals jsonVal) -> do
-           UI.setCheckboxChecked (equalsCheck dialogRec)
-           case jsonVal of
-            Aeson.String jsonText ->
-              UI.setEditText (operandEdit dialogRec) jsonText
-            _ -> error "Only text is supported for json equality for now."
-         (MatchesRegex _) -> error "MatchesRegex is not yet supported."
-         (HasSubstring text) -> do
-           UI.setCheckboxChecked (substringCheck dialogRec)
-           UI.setEditText (operandEdit dialogRec) text
-         (HasKey text) -> do
-           UI.setCheckboxChecked (hasKeyCheck dialogRec)
-           UI.setEditText (operandEdit dialogRec) text
+  let editFilter index logFilter = do
+        setDefaultsFromFilter dialogRec logFilter
         writeIORef filterIndexRef $ Just index
 
-  filterDialog dialogRec `UI.onDialogAccept` \_ -> do
+  filterDialog `UI.onDialogAccept` \_ -> do
     maybeIndex <- readIORef filterIndexRef
     case maybeIndex of
      Nothing -> error "Error: trying to save an edited filter without knowing its index"
@@ -487,37 +371,14 @@ makeFilterEditWindow filtersRef refreshMessages switchToMain = do
           writeIORef filterIndexRef Nothing
           switchToMain
 
-  return (UI.dialogWidget (filterDialog dialogRec), filterFg dialogRec, editFilter)
+  return (UI.dialogWidget filterDialog, filterFg, editFilter)
 
-
--- | Create a Filter based on the contents of a filter-editing dialog.
-filterFromDialog :: FilterDialog -> IO (Maybe LogFilter)
-filterFromDialog dialogRec = do
-    pathText <- UI.getEditText (jsonPathEdit dialogRec)
-    operand <- UI.getEditText (operandEdit dialogRec)
-    currentRadio <- UI.getCurrentRadio (operatorRadioGroup dialogRec)
-    nameText <- UI.getEditText (nameEdit dialogRec)
-    let predicate = case currentRadio of
-          Just rButton
-            | rButton == equalsCheck dialogRec -> Equals $ Aeson.String operand
-            | rButton == substringCheck dialogRec -> HasSubstring operand
-            | rButton == hasKeyCheck dialogRec -> HasKey operand
-          _ -> error "shouldn't happen because there's a default"
-    let mpath = Parser.getPath $ T.unpack pathText
-    case mpath of
-     Right path -> do
-       let filt = LogFilter {filterName=nameText,
-                             jsonPath=path,
-                             jsonPredicate=predicate,
-                             filterIsActive=IsActive True}
-       return $ Just filt
-     Left _ -> return Nothing
 
 makeFilterCreationWindow :: FiltersRef -> IO () -> IO () -> IO (UI.Widget _W, UI.Widget UI.FocusGroup, IO ())
 makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
-  dialogRec <- makeFilterDialog "Create Filter" switchToMain
+  (dialogRec, filterDialog, filterFg) <- makeFilterDialog "Create Filter" switchToMain
 
-  filterDialog dialogRec `UI.onDialogAccept` \_ -> do
+  filterDialog `UI.onDialogAccept` \_ -> do
     maybeNameAndFilt <- filterFromDialog dialogRec
     case maybeNameAndFilt of
      Just filt -> do
@@ -526,10 +387,10 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
        switchToMain
      Nothing -> return ()
 
-  let createFilter = setDefaults dialogRec
+  let createFilter = blankFilterDialog dialogRec
 
-  return (UI.dialogWidget (filterDialog dialogRec),
-          filterFg dialogRec,
+  return (UI.dialogWidget filterDialog,
+          filterFg,
           createFilter)
 
 makeSaveSettingsDialog

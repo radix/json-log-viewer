@@ -5,31 +5,34 @@
 
 module Main where
 
--- There are a few big gross things about this app
--- 1. The code is poorly factored (my fault)
--- 2. There is no good "model/view" layer in vty-ui. Dealing with the lists of
---    messages, pinned messages, and filters, is tedious and error-prone. If
---    List widgets wrapped and observed ListModels instead of making me
---    manually manage everything in the list, everything would be a lot
---    better. I could certainly implement such a layer myself but so far I
---    have just suffered through it.
--- 3. All the UI setup code is pointlessly in the IO monad. It seems so much
---    better to me (a Haskell newbie, so take that with a grain of salt) that
---    only runUi, various "set" functions, and event handlers should return IO,
---    and there should be some pure API for constructing trees of
---    widgets.
--- 4. (I'm not so sure on this one) Widget types depend on their contents. I
---    like the idea of strongly typing as much as possible, but it's annoyed me
---    a few times. The annoyance is drastically lessened with use of GHC's new
---    "partial type signatures", so I can just try to ignore the contents of
---    widgets.
--- 5. There's no show/hide mechanism in vty-ui, and the "Group" widget will
---    only allow replacing a widget with the *same type* of widget (see #4).
+{-
+
+There are a few big gross things about this app
+1. The code is poorly factored (my fault)
+2. There is no good "model/view" layer in vty-ui. Dealing with the lists of
+   messages, pinned messages, and filters, is tedious and error-prone. If
+   List widgets wrapped and observed ListModels instead of making me
+   manually manage everything in the list, everything would be a lot
+   better. I could certainly implement such a layer myself but so far I
+   have just suffered through it.
+3. All the UI setup code is pointlessly in the IO monad. It seems so much
+   better to me (a Haskell newbie, so take that with a grain of salt) that
+   only runUi, various "set" functions, and event handlers should return IO,
+   and there should be some pure API for constructing trees of
+   widgets.
+4. (I'm not so sure on this one) Widget types depend on their contents. I
+   like the idea of strongly typing as much as possible, but it's annoyed me
+   a few times. The annoyance is drastically lessened with use of GHC's new
+   "partial type signatures", so I can just try to ignore the contents of
+   widgets.
+5. There's no show/hide mechanism in vty-ui, and the "Group" widget will
+   only allow replacing a widget with the *same type* of widget (see #4).
 
 
--- Doing List as a view/model thing will be kind of tricky. For my use case it
--- would require the ability to indicate list items to show/hide.
+Doing List as a view/model thing will be kind of tricky. For my use case it
+would require the ability to indicate list items to show/hide.
 
+-}
 
 import           Control.Concurrent         (forkIO)
 import           Control.Monad              (unless, when)
@@ -349,7 +352,6 @@ makeMainWindow collection messagesRef filtersRef followingRef columnsRef = do
      Events.KEsc -> exitSuccess
      _ -> return False
 
-
   refreshMessages
   return (messageList, filterList, pinnedList, refreshMessages, addMessages, switchToMain)
 
@@ -367,13 +369,27 @@ addMessagesToUI oldLength filters columns messageList newMessages currentlyFollo
   UI.addMultipleToList messageList messageItems
   when currentlyFollowing $ UI.scrollToEnd messageList
 
-makeMessageDetailWindow :: IO (UI.Widget _W, UI.Widget UI.FormattedText)
-makeMessageDetailWindow = do
+
+makeMessageDetailWindow
+  :: UI.Collection
+  -> IO () -- ^ switchToMain action
+  -> IO (Aeson.Value -> IO ()) -- ^ A function for viewing message details
+makeMessageDetailWindow collection switchToMain = do
   mdHeader' <- UI.plainText "Message Detail. ESC=return"
   mdHeader <- UI.bordered mdHeader'
   mdBody <- UI.plainText "Insert message here."
   messageDetail <- UI.vBox mdHeader mdBody
-  return (messageDetail, mdBody)
+  messageDetailFg <- UI.newFocusGroup
+  switchToMessageDetail <- UI.addToCollection collection messageDetail messageDetailFg
+  messageDetailFg `UI.onKeyPressed` \_ key _ ->
+    case key of
+     Events.KEsc -> switchToMain >> return True
+     _ -> return False
+  let viewDetails value = do
+        let pretty = decodeUtf8 $ BSL.toStrict $ encodePretty value
+        UI.setText mdBody pretty
+        switchToMessageDetail
+  return viewDetails
 
 
 makeFilterEditWindow
@@ -455,12 +471,14 @@ makeSaveSettingsDialog filtersRef columnsRef switchToMain = do
 
   return (dialogWidget, dialogFg)
 
+
 -- |Convert lines from our streaming process to Messages
 byteStringsToMessages :: [BS.ByteString] -> Messages
 byteStringsToMessages newLines =
   let decoder = Aeson.decode :: BSL.ByteString -> Maybe Aeson.Value
       newJsons = mapMaybe (decoder . BSL.fromStrict) newLines
   in Seq.fromList $ map (IsPinned False,) newJsons
+
 
 usage :: String
 usage = " \n\
@@ -474,6 +492,7 @@ usage = " \n\
 \fish supports file redirection but I haven't figured out the syntax for\n\
 \subprocess redirection."
 
+
 main :: IO ()
 main = do
   args <- getArgs
@@ -482,6 +501,7 @@ main = do
         ["-h"] -> error usage
         ["--help"] -> error usage
         _ -> error usage
+
 
 startApp :: IO ()
 startApp = do
@@ -511,11 +531,8 @@ startApp = do
   handle <- fdToHandle $ Fd 3
   _ <- forkIO $ streamLines handle $ LinesCallback (UI.schedule . addMessages . byteStringsToMessages)
 
-
   -- message detail window
-  (messageDetail, mdBody) <- makeMessageDetailWindow
-  messageDetailFg <- UI.newFocusGroup
-  switchToMessageDetail <- UI.addToCollection c messageDetail messageDetailFg
+  viewMessageDetails <- makeMessageDetailWindow c switchToMain
 
   -- filter creation window
   (filterCreationWidget,
@@ -532,11 +549,10 @@ startApp = do
   (saveSettingsWidget, saveSettingsFg) <- makeSaveSettingsDialog filtersRef columnsRef switchToMain
   switchToSaveSettingsDialog <- UI.addToCollection c saveSettingsWidget saveSettingsFg
 
-
   -- vty-ui, bafflingly, calls event handlers going from *outermost* first to
   -- the innermost widget last. So if we bind things on mainFg, they will
   -- override things like key input in the column text field. (!?)  So we apply
-  -- the "mostly-global" key bindings to almost all widgets, but not the
+  -- the "mostly global" key bindings to almost all widgets, but not the
   -- column-edit widget.
   let bindGlobalThings _ key mods = case (key, mods) of
         (Events.KChar 'q', []) -> exitSuccess
@@ -560,24 +576,18 @@ startApp = do
           return True
         _ -> return False
 
-
   messageList `UI.onKeyPressed` bindGlobalThings
   filterList `UI.onKeyPressed` bindGlobalThings
   pinnedList `UI.onKeyPressed` bindGlobalThings
 
-  let viewDetails msg = do
-        let pretty = decodeUtf8 $ BSL.toStrict $ encodePretty msg
-        UI.setText mdBody pretty
-        switchToMessageDetail
-
   pinnedList `UI.onItemActivated` \(UI.ActivateItemEvent _ (_, message) _) ->
-    viewDetails message
+    viewMessageDetails message
 
   messageList `UI.onItemActivated` \(UI.ActivateItemEvent _ index _) -> do
     -- Note that this `index` is the UI.List "value", not the index into the
     -- List view.
     messages <- readIORef messagesRef
-    viewDetails $ snd $ messages `Seq.index` index
+    viewMessageDetails $ snd $ messages `Seq.index` index
 
   filterList `UI.onItemActivated` \(UI.ActivateItemEvent index filt _) -> do
     editFilter index filt
@@ -594,12 +604,6 @@ startApp = do
           refreshMessages
           return True
         Nothing -> return False
-     _ -> return False
-
-
-  messageDetailFg `UI.onKeyPressed` \_ key _ ->
-    case key of
-     Events.KEsc -> switchToMain >> return True
      _ -> return False
 
   UI.runUi c UI.defaultContext

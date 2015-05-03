@@ -393,21 +393,16 @@ makeMessageDetailWindow collection switchToMain = do
 
 
 makeFilterEditWindow
-  :: FiltersRef
+  :: UI.Collection
+  -> FiltersRef
   -> IO () -- ^ refreshMessages function
   -> IO () -- ^ switchToMain function
-  -> IO (UI.Widget _W -- ^ the main widget
-        , UI.Widget UI.FocusGroup -- ^ the dialog's focus group
-        , FiltersIndex -> LogFilter -> IO ()) -- ^ the editFilter function
-makeFilterEditWindow filtersRef refreshMessages switchToMain = do
+  -> IO (Int -> LogFilter -> IO ()) -- ^ the editFilter function
+makeFilterEditWindow collection filtersRef refreshMessages switchToMain = do
   (dialogRec, filterDialog, filterFg) <- makeFilterDialog "Edit Filter" switchToMain
 
   -- YUCK
   filterIndexRef <- newIORef (Nothing :: Maybe FiltersIndex)
-
-  let editFilter index logFilter = do
-        setDefaultsFromFilter dialogRec logFilter
-        writeIORef filterIndexRef $ Just index
 
   filterDialog `UI.onDialogAccept` \_ -> do
     maybeIndex <- readIORef filterIndexRef
@@ -423,11 +418,18 @@ makeFilterEditWindow filtersRef refreshMessages switchToMain = do
           writeIORef filterIndexRef Nothing
           switchToMain
 
-  return (UI.dialogWidget filterDialog, filterFg, editFilter)
+  let filterEditWidget = UI.dialogWidget filterDialog
+  switchToFilterEdit <- UI.addToCollection collection filterEditWidget filterFg
+  let editFilter index logFilter = do
+        setDefaultsFromFilter dialogRec logFilter
+        writeIORef filterIndexRef $ Just index
+        switchToFilterEdit
+
+  return editFilter
 
 
-makeFilterCreationWindow :: FiltersRef -> IO () -> IO () -> IO (UI.Widget _W, UI.Widget UI.FocusGroup, IO ())
-makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
+makeFilterCreationWindow :: UI.Collection -> FiltersRef -> IO () -> IO () -> IO (IO ())
+makeFilterCreationWindow collection filtersRef refreshMessages switchToMain = do
   (dialogRec, filterDialog, filterFg) <- makeFilterDialog "Create Filter" switchToMain
 
   filterDialog `UI.onDialogAccept` \_ -> do
@@ -439,18 +441,18 @@ makeFilterCreationWindow filtersRef refreshMessages switchToMain = do
        switchToMain
      Nothing -> return ()
 
-  let createFilter = blankFilterDialog dialogRec
-
-  return (UI.dialogWidget filterDialog,
-          filterFg,
-          createFilter)
+  let filterCreationWidget = UI.dialogWidget filterDialog
+  switchToFilterCreation <- UI.addToCollection collection filterCreationWidget filterFg
+  let createFilter = do blankFilterDialog dialogRec; switchToFilterCreation
+  return createFilter
 
 makeSaveSettingsDialog
-  :: FiltersRef
+  :: UI.Collection
+  -> FiltersRef
   -> ColumnsRef
   -> IO () -- ^ switchToMain
-  -> IO (UI.Widget _W, UI.Widget UI.FocusGroup)
-makeSaveSettingsDialog filtersRef columnsRef switchToMain = do
+  -> IO (IO ())
+makeSaveSettingsDialog collection filtersRef columnsRef switchToMain = do
   settingsPath <- getSettingsFilePath
   dialogBody <- UI.plainText $ T.append "Filters and columns will be saved to " $ T.pack settingsPath
   (dialog, dialogFg) <- UI.newDialog dialogBody "Save settings?"
@@ -468,8 +470,9 @@ makeSaveSettingsDialog filtersRef columnsRef switchToMain = do
     return ()
 
   dialog `UI.onDialogCancel` const switchToMain
+  switchToSaveSettingsDialog <- UI.addToCollection collection dialogWidget dialogFg
 
-  return (dialogWidget, dialogFg)
+  return switchToSaveSettingsDialog
 
 
 -- |Convert lines from our streaming process to Messages
@@ -531,23 +534,11 @@ startApp = do
   handle <- fdToHandle $ Fd 3
   _ <- forkIO $ streamLines handle $ LinesCallback (UI.schedule . addMessages . byteStringsToMessages)
 
-  -- message detail window
+  -- Set up the various dialogs / modal views of the app
   viewMessageDetails <- makeMessageDetailWindow c switchToMain
-
-  -- filter creation window
-  (filterCreationWidget,
-   filterCreationFg,
-   createFilter) <- makeFilterCreationWindow filtersRef refreshMessages switchToMain
-  switchToFilterCreation <- UI.addToCollection c filterCreationWidget filterCreationFg
-
-  -- filter edit window
-  (filterEditWidget,
-   filterEditFg,
-   editFilter) <- makeFilterEditWindow filtersRef refreshMessages switchToMain
-  switchToFilterEdit <- UI.addToCollection c filterEditWidget filterEditFg
-
-  (saveSettingsWidget, saveSettingsFg) <- makeSaveSettingsDialog filtersRef columnsRef switchToMain
-  switchToSaveSettingsDialog <- UI.addToCollection c saveSettingsWidget saveSettingsFg
+  createFilter <- makeFilterCreationWindow c filtersRef refreshMessages switchToMain
+  editFilter <- makeFilterEditWindow c filtersRef refreshMessages switchToMain
+  saveSettings <- makeSaveSettingsDialog c filtersRef columnsRef switchToMain
 
   -- vty-ui, bafflingly, calls event handlers going from *outermost* first to
   -- the innermost widget last. So if we bind things on mainFg, they will
@@ -558,21 +549,14 @@ startApp = do
         (Events.KChar 'q', []) -> exitSuccess
         (Events.KChar 'f', []) -> do
           createFilter
-          switchToFilterCreation
           return True
         (Events.KChar 'e', []) -> do
           isFollowing <- readIORef followingRef
           unless isFollowing $ UI.scrollToEnd messageList
           modifyIORef followingRef not
           return True
-        (Events.KChar 'j', []) -> do
-          UI.scrollDown messageList
-          return True
-        (Events.KChar 'k', []) -> do
-          UI.scrollUp messageList
-          return True
         (Events.KChar 's', [Events.MCtrl]) -> do
-          switchToSaveSettingsDialog
+          saveSettings
           return True
         _ -> return False
 
@@ -591,7 +575,6 @@ startApp = do
 
   filterList `UI.onItemActivated` \(UI.ActivateItemEvent index filt _) -> do
     editFilter index filt
-    switchToFilterEdit
 
   filterList `UI.onKeyPressed` \_ key _ ->
     case key of

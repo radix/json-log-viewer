@@ -32,7 +32,7 @@ module Main where
 
 
 import           Control.Concurrent         (forkIO)
-import           Control.Monad              (forever, unless, when)
+import           Control.Monad              (unless, when)
 import qualified Data.Aeson                 as Aeson
 import           Data.Aeson.Encode.Pretty   (encodePretty)
 import qualified Data.ByteString            as BS
@@ -52,8 +52,6 @@ import           Graphics.Vty.Widgets.All   ((<++>), (<-->))
 import qualified Graphics.Vty.Widgets.All   as UI
 import           System.Environment         (getArgs)
 import           System.Exit                (exitSuccess)
-import           System.IO                  (BufferMode (LineBuffering), Handle,
-                                             hIsSeekable, hReady, hSetBuffering)
 import           System.Posix.IO            (fdToHandle)
 import           System.Posix.Types         (Fd (Fd))
 
@@ -66,10 +64,10 @@ import           JsonLogViewer.Settings     (getSettingsFilePath,
                                              loadSettingsFile,
                                              writeSettingsFile)
 import           JsonLogViewer.UIUtils      (makeCoolList, makeEditField)
+import JsonLogViewer.StreamLines (LinesCallback (..), streamLines)
 
 -- purely informative type synonyms
 newtype IsPinned = IsPinned { unIsPinned :: Bool } deriving Show
-newtype LinesCallback = LinesCallback { unLinesCallback :: [BS.ByteString] -> IO () }
 type FilterName = T.Text
 type Filters = [LogFilter]
 type Message = (IsPinned, Aeson.Value)
@@ -308,8 +306,6 @@ makeMessageDetailWindow = do
   return (messageDetail, mdBody)
 
 
--- TODO radix: consider async + wait for getting the result of filter editing?
-
 makeFilterEditWindow
   :: FiltersRef
   -> IO () -- ^ refreshMessages function
@@ -401,35 +397,6 @@ linesReceived addMessages newLines = do
       newJsons = mapMaybe (decoder . BSL.fromStrict) newLines
       newMessages = Seq.fromList $ map (IsPinned False,) newJsons
   addMessages newMessages
-
--- |Given a Handle, call the callback function
-streamLines :: Handle -> LinesCallback -> IO ()
-streamLines handle callback = do
-  isNormalFile <- hIsSeekable handle
-  if isNormalFile then cb =<< BS.split 10 <$> BS.hGetContents handle
-  else do
-    -- it's a real stream, so let's stream it
-    hSetBuffering handle LineBuffering
-    forever $ do
-      availableLines <- hGetLines handle
-      if not $ null availableLines then cb availableLines
-      else do
-        -- fall back to a blocking read now that we've reached the end of the
-        -- stream
-        line <- BS.hGetLine handle
-        cb [line]
-  where cb = unLinesCallback callback
-
--- |Get all the lines available from a handle, *hopefully* without blocking
--- This will sadly still block if there is a partial line at the end of the
--- stream and no more data is being written. hGetBufNonBlocking would allow me
--- to work around this problem, but then I'd have to keep my own buffer!
-hGetLines :: Handle -> IO [BS.ByteString]
-hGetLines handle = do
-  readable <- hReady handle
-  if readable then (:) <$> BS.hGetLine handle <*> hGetLines handle
-  else return []
-
 
 usage :: String
 usage = " \n\

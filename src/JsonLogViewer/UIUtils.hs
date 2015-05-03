@@ -38,8 +38,7 @@ makeCoolList
                  UI.Box UI.VBorder (
                    UI.List a b))
                  UI.VBorder))
-              UI.HBorder)
-         )
+              UI.HBorder))
 makeCoolList itemSize label = do
   list <- UI.newList itemSize
   topBorder <- UI.hBorder >>= UI.withHBorderLabel label

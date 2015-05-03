@@ -1,9 +1,9 @@
 module JsonLogViewer.StreamLines (LinesCallback(..), streamLines) where
 
-import Control.Monad (forever)
-import qualified Data.ByteString            as BS
-import           System.IO                  (BufferMode (LineBuffering), Handle,
-                                             hIsSeekable, hReady, hSetBuffering)
+import           Control.Monad   (forever)
+import qualified Data.ByteString as BS
+import           System.IO       (BufferMode (LineBuffering), Handle,
+                                  hIsSeekable, hReady, hSetBuffering)
 
 
 newtype LinesCallback = LinesCallback { unLinesCallback :: [BS.ByteString] -> IO () }

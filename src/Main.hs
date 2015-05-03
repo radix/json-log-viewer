@@ -66,8 +66,8 @@ import           JsonLogViewer.Filtration   (IsActive (..), LogFilter (..),
 import           JsonLogViewer.Settings     (getSettingsFilePath,
                                              loadSettingsFile,
                                              writeSettingsFile)
+import           JsonLogViewer.StreamLines  (LinesCallback (..), streamLines)
 import           JsonLogViewer.UIUtils      (makeCoolList, makeEditField)
-import JsonLogViewer.StreamLines (LinesCallback (..), streamLines)
 
 -- purely informative type synonyms
 newtype IsPinned = IsPinned { unIsPinned :: Bool } deriving Show
@@ -191,7 +191,8 @@ formatFilterForList filt = T.append (if unIsActive $ filterIsActive filt
                                         else "- ")
                                     (filterName filt)
 
-refreshMessagesUI 
+
+refreshMessagesUI
    :: MessagesRef
    -> FiltersRef
    -> CurrentlyFollowingRef
@@ -355,6 +356,7 @@ makeMainWindow collection messagesRef filtersRef followingRef columnsRef = do
   refreshMessages
   return (messageList, filterList, pinnedList, refreshMessages, addMessages, switchToMain)
 
+
 addMessagesToUI :: Int -> Filters -> [T.Text] -> MessageListWidget -> Messages -> CurrentlyFollowing -> IO ()
 addMessagesToUI oldLength filters columns messageList newMessages currentlyFollowing = do
   let theRange = [oldLength..]
@@ -445,6 +447,7 @@ makeFilterCreationWindow collection filtersRef refreshMessages switchToMain = do
   switchToFilterCreation <- UI.addToCollection collection filterCreationWidget filterFg
   let createFilter = do blankFilterDialog dialogRec; switchToFilterCreation
   return createFilter
+
 
 makeSaveSettingsDialog
   :: UI.Collection

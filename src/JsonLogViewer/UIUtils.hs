@@ -1,14 +1,14 @@
 {-# LANGUAGE NamedWildCards        #-}
-{-# LANGUAGE OverloadedStrings         #-}
-{-# LANGUAGE PartialTypeSignatures     #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE PartialTypeSignatures #-}
 
 module JsonLogViewer.UIUtils where
 
-import qualified Data.Text                as T
-import qualified Graphics.Vty.Attributes  as Attrs
-import qualified Graphics.Vty.Input.Events  as Events
-import           Graphics.Vty.Widgets.All ((<++>), (<-->))
-import qualified Graphics.Vty.Widgets.All as UI
+import qualified Data.Text                 as T
+import qualified Graphics.Vty.Attributes   as Attrs
+import qualified Graphics.Vty.Input.Events as Events
+import           Graphics.Vty.Widgets.All  ((<++>), (<-->))
+import qualified Graphics.Vty.Widgets.All  as UI
 
 
 makeField :: (Show a) => T.Text -> UI.Widget a -> IO (UI.Widget (UI.Box UI.FormattedText a))
@@ -54,7 +54,7 @@ makeCoolList itemSize label = do
   list `UI.onSelectionChange` const updateBottomLabel
   list `UI.onItemAdded` const updateBottomLabel
   list `UI.setSelectedUnfocusedAttr` Just (Attrs.defAttr `Attrs.withStyle` Attrs.reverseVideo)
-  
+
   list `UI.onKeyPressed` \_ key _ -> case key of
     Events.KChar 'j' -> do
       UI.scrollDown list

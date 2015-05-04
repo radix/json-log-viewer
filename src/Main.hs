@@ -32,6 +32,95 @@ There are a few big gross things about this app
 Doing List as a view/model thing will be kind of tricky. For my use case it
 would require the ability to indicate list items to show/hide.
 
+Factoring ideas: Optimize for understanding the application.
+
+There are a number of "modes" that the application can be in:
+- messages view
+- message detail
+- filter creation
+- filter editing
+- saving settings
+The main screen needs to be able to switch to any of the other modes, and
+the other modes need to be able to switch back to the main screen.
+
+Another axis of important things is *actions that can be taken*:
+- view details of a message
+- create a filter
+- edit a filter
+- pin/unpin a message
+- process received messages
+- refilter all messages (this is a secondary effect of other things)
+
+So we could have a central AppState value, with the following functions,
+ideally:
+- viewSelectedMessageDetail appState -- Or should it be passed the message?
+- switchToMain appState
+- createFilter appState
+- editSelectedFilter appState -- Or should it be passed the filter?
+- saveSettings appState
+- pinSelectedMessage appState -- Or should it be passed the message?
+- unPinSelectedMessage appState -- Or should it be passed the message?
+- refreshMessages appState
+- addMessage appState message
+
+
+This is a pretty object-oriented design, where scopes are probably
+unnecessarily large. But then, scopes are already unnecessarily large in the
+current codebase, while having a completely unclear structure. So this would
+certainly be a win over the current state of affairs.
+
+Let's consider another idea: A "language" of high-level interactions with the
+application.
+
+data Interactions
+ = ViewMessage
+ | ViewPinnedMessage
+ | PinMessage
+ | UnPinMessage
+ | CreateFilter
+ | EditFilter
+ | ToggleFilter
+ | SaveSettings
+
+This language could be interpreted, assuming the environment that it's
+interpreted in has all the nitty-gritty details of the UI, as a number of the
+directives rely on knowing what's currently selected by the user.
+
+If we want to make that more explicit, we could also have
+
+data Interactions
+ = ViewMessage Int
+ | ViewPinnedMessage Int
+ | PinMessage Int
+ | UnPinMessage Int
+ | CreateFilter
+ | EditFilter Int
+ | ToggleFilter Int
+ | SaveSettings
+
+where the UI would have to include the relevant selections in the commands sent
+to the interpreter (or "controller"). This would allow the UI to be cleanly
+separated from the model *in one direction*.
+
+The other direction is still a problem: the interpretation of the commands
+needs to affect the UI as well. Commands like CreateFilter need to be able to
+switch to a dialog and switch back after the new filter has been saved, and
+commands like ViewMessage don't really affect the model at all, but are purely
+View-level.
+
+We could perhaps solve this problem by making the model "observable"...
+
+or by treating the interpreter as a true controller, which has access to affect
+the UI and to affect the model. For example, evaluating the CreateFilter action
+would require the controller to
+
+1. switch to the create-filter dialog
+2. oh god ugh (RUN A NESTED INTERPRETER OF DIFFERENT INTERACTIONS?)
+3. save the filter to the Filters list.
+4. Switch back to the main window
+5. and refresh the messages view
+
+By the way: FRP
 -}
 
 import           Control.Concurrent         (forkIO)
@@ -136,46 +225,6 @@ formatMessage columns message = if null columns
                                 then jsonToText message
                                 else columnify columns message
 
-
-{-
-
-Factoring ideas: Optimize for understanding the application.
-
-There are a number of "modes" that the application can be in:
-- messages view
-- message detail
-- filter creation
-- filter editing
-- saving settings
-The main screen needs to be able to switch to any of the other modes, and
-the other modes need to be able to switch back to the main screen.
-
-Another axis of important things is *actions that can be taken*:
-- view details of a message
-- create a filter
-- edit a filter
-- pin/unpin a message
-- process received messages
-- refilter all messages (this is a secondary effect of other things)
-
-So we could have a central AppState value, with the following functions, ideally:
-- viewSelectedMessageDetail appState -- Or should it be passed the message?
-- switchToMain appState
-- createFilter appState
-- editSelectedFilter appState -- Or should it be passed the filter?
-- saveSettings appState
-- pinSelectedMessage appState -- Or should it be passed the message?
-- unPinSelectedMessage appState -- Or should it be passed the message?
-- refreshMessages appState
-- addMessage appState message
-
-
-This is a pretty object-oriented design, where scopes are probably
-unnecessarily large. But then, scopes are already unnecessarily large in the
-current codebase, while having a completely unclear structure. So this would
-certainly be a win over the current state of affairs.
-
--}
 
 -- UI code. It's groooooss.
 

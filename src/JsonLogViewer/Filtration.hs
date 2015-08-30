@@ -16,8 +16,6 @@ import qualified Data.Vector            as V
 
 
 
-newtype IsActive = IsActive {unIsActive :: Bool } deriving Show
-
 data JSONPredicate
   = Equals Aeson.Value
   | MatchesRegex T.Text
@@ -29,7 +27,7 @@ data LogFilter = LogFilter
   { jsonPath       :: JSONPath
   , jsonPredicate  :: JSONPredicate
   , filterName     :: T.Text
-  , filterIsActive :: IsActive} deriving Show
+  , filterIsActive :: Bool} deriving Show
 
 lArray :: [Aeson.Value] -> Aeson.Value
 lArray = Aeson.Array . V.fromList
@@ -52,7 +50,7 @@ instance Aeson.FromJSON JSONPredicate where
 instance Aeson.ToJSON LogFilter where
   toJSON (LogFilter {..}) = Aeson.object [
     "name" .= filterName
-    , "is_active" .= unIsActive filterIsActive
+    , "is_active" .= filterIsActive
     , "path" .= Parser.toString jsonPath
     , "predicate" .= Aeson.toJSON jsonPredicate]
 
@@ -67,7 +65,7 @@ instance Aeson.FromJSON LogFilter where
     let parsed = Parser.getPath pathText
     case parsed of
      Right path -> return LogFilter {filterName=name,
-                                     filterIsActive=IsActive isActive,
+                                     filterIsActive=isActive,
                                      jsonPredicate=predicate, jsonPath=path}
      Left e -> fail ("Error when parsing jsonPath: " ++ show e)
   parseJSON _ = mzero
@@ -84,5 +82,3 @@ matchFilter (LogFilter {jsonPath, jsonPredicate}) aesonValue
   | Just gotValue <- followPath jsonPath aesonValue
     = jsonPredicate `matchPredicate` gotValue
 matchFilter _ _ = False
-
-

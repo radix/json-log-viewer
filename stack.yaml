@@ -1,8 +1,4 @@
 flags: {}
 packages:
 - '.'
-- forked/vty-ui
-extra-deps:
-  - vty-5.2.9
-  - QuickCheck-2.7.6
-resolver: nightly-2015-06-09
+resolver: nightly-2015-08-27

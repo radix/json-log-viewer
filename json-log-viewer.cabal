@@ -45,6 +45,7 @@ executable json-log-viewer
   build-depends: base >=4.8 && <4.9
                , aeson
                , brick
+               , data-default
                , vty
                , text
                , containers

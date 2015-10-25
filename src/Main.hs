@@ -13,6 +13,7 @@ import           Data.Aeson.Encode.Pretty   (encodePretty)
 import qualified Data.ByteString            as BS
 import qualified Data.ByteString.Lazy       as BSL
 import           Data.Char                  (isSpace)
+import Data.Default (def)
 import           Data.Foldable              (toList)
 import qualified Data.HashMap.Strict        as HM
 import           Data.IORef                 (IORef, modifyIORef, newIORef,
@@ -27,6 +28,22 @@ import           System.Environment         (getArgs)
 import           System.Exit                (exitSuccess)
 import           System.Posix.IO            (fdToHandle)
 import           System.Posix.Types         (Fd (Fd))
+
+import qualified Graphics.Vty as V
+
+import qualified Brick.Main as M
+import qualified Brick.Types as T
+import Brick.Widgets.Core
+  ( (<+>)
+  , (<=>)
+  , hLimit
+  , vLimit
+  , str
+  )
+import qualified Brick.Widgets.Center as C
+import qualified Brick.Widgets.Edit as E
+import qualified Brick.AttrMap as A
+import Brick.Util (on)
 
 import           JsonLogViewer.Filtration   (LogFilter (..),
                                              matchFilter)
@@ -51,6 +68,13 @@ look like? How about something like this:
 -}
 
 
+
+
+theMap :: A.AttrMap
+theMap = A.attrMap V.defAttr
+    [ (E.editAttr, V.white `on` V.blue)
+    ]
+
 data JsonLogViewerState = JsonLogViewerState
     { messages :: Seq.Seq Message
     , currentlyViewing :: Maybe Message
@@ -60,6 +84,29 @@ data JsonLogViewerState = JsonLogViewerState
     , columns :: [T.Text]
     }
 
+theApp :: M.App JsonLogViewerState V.Event
+theApp =
+    M.App { M.appDraw = drawUI
+          , M.appChooseCursor = M.neverShowCursor
+          , M.appHandleEvent = M.resizeOrQuit
+          , M.appStartEvent = return
+          , M.appAttrMap = def
+          , M.appLiftVtyEvent = id
+          }
+
+
+initialState :: JsonLogViewerState
+initialState =
+    JsonLogViewerState { messages = mempty
+                       , currentlyViewing = Nothing
+                       , pinnedMessages = mempty
+                       , filters = mempty
+                       , currentlyFollowing = False
+                       , columns = mempty}
+
+
+drawUI :: JsonLogViewerState -> [T.Widget]
+drawUI st = [str "Hello, world!"]
 
 -- |Return True if the message should be shown in the UI (if it's pinned or
 -- matches filters)
@@ -157,4 +204,5 @@ startApp = do
   -- load settings
   fp <- getSettingsFilePath
   (filters, columns) <- loadSettingsFile fp
-  putStrLn "hello, world!"
+  st <- M.defaultMain theApp initialState
+  putStrLn "Done."
